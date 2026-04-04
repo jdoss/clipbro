@@ -1,0 +1,27 @@
+[package]
+name = "clipbro"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0"
+description = "A standalone clipboard manager daemon with hotkey-triggered overlay"
+repository = "https://github.com/jdoss/clipbro"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+zbus = "5"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.39", features = ["bundled-sqlcipher"] }
+oo7 = "0.6"
+nucleo = "0.5"
+chrono = { version = "0.4", default-features = false, features = ["now"] }
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+directories = "6"
+rand = "0.9"
+thiserror = "2"
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+default-features = false
+features = ["tokio", "wayland", "winit"]
