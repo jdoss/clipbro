@@ -994,4 +994,55 @@ mod tests {
     fn ext_to_display_name_unknown_passthrough() {
         assert_eq!(ext_to_display_name("xyz"), "xyz");
     }
+
+    // -- guess_candidates XML/HTML --
+
+    #[test]
+    fn guess_candidates_xml() {
+        let c = guess_candidates("<?xml version=\"1.0\"?>");
+        assert!(c.contains(&"xml"));
+    }
+
+    #[test]
+    fn guess_candidates_html() {
+        let c = guess_candidates(
+            "<!DOCTYPE html>\n<html><body></body></html>",
+        );
+        assert!(c.contains(&"html"));
+    }
+
+    #[test]
+    fn guess_candidates_svg() {
+        let c = guess_candidates(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">",
+        );
+        assert!(c.contains(&"xml"));
+    }
+
+    // -- content_hash for image entry --
+
+    #[test]
+    fn content_hash_uses_image_when_no_text() {
+        let e1 = make_entry(
+            1,
+            image_map("image/png", b"imgdata"),
+        );
+        let e2 = make_entry(
+            2,
+            image_map("image/png", b"imgdata"),
+        );
+        assert_eq!(
+            e1.content_hash(),
+            e2.content_hash(),
+        );
+
+        let e3 = make_entry(
+            3,
+            image_map("image/png", b"different"),
+        );
+        assert_ne!(
+            e1.content_hash(),
+            e3.content_hash(),
+        );
+    }
 }

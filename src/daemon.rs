@@ -1038,6 +1038,67 @@ mod tests {
             "rapid duplicate should be skipped",
         );
     }
+
+    #[tokio::test]
+    async fn store_skips_selection_echo() {
+        let mock = MockClipboardService::new();
+        let mut daemon = test_daemon(mock);
+
+        let content = b"selected content";
+        daemon.last_selection_hash = Some((
+            Instant::now(),
+            hash_content(content),
+        ));
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                content,
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        assert!(
+            db.list_entries(10).unwrap().is_empty(),
+            "selection echo should be skipped",
+        );
+    }
+
+    #[tokio::test]
+    async fn store_image_does_not_sync() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection().times(0);
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "image/png",
+                b"fake image bytes here",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        let entries = db.list_entries(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].entry_type,
+            EntryType::Image,
+        );
+    }
+
+    #[tokio::test]
+    async fn select_nonexistent_entry() {
+        let mock = MockClipboardService::new();
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(
+                PopupAction::SelectEntry { id: 999999 },
+            )
+            .await;
+    }
 }
 
 pub async fn run(db: Database, config: Config) {

@@ -205,4 +205,11 @@ delete_entry = "ctrl+d"
         assert_eq!(c.max_entries, 100);
         assert_eq!(c.position, "top");
     }
+
+    #[test]
+    fn invalid_toml_returns_error() {
+        let result: Result<Config, _> =
+            toml::from_str("not = [valid toml");
+        assert!(result.is_err());
+    }
 }
