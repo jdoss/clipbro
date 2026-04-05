@@ -2,7 +2,7 @@
 name = "clipbro"
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0"
+license = "MIT"
 description = "A standalone clipboard manager daemon with hotkey-triggered overlay"
 repository = "https://github.com/jdoss/clipbro"
 
