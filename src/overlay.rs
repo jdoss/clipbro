@@ -54,6 +54,8 @@ enum Message {
     NavBackward,
     CharTyped(String),
     Backspace,
+    CycleTypeFilter,
+    CycleTypeFilterReverse,
     CtrlState(bool),
     TogglePause,
     PauseSent,
@@ -142,10 +144,14 @@ struct HighlightedText {
     spans: Vec<(Color, String)>,
 }
 
+use crate::entry::EntryType;
+
 struct Overlay {
     entries: Vec<Entry>,
     search_query: String,
     focused_index: usize,
+    type_filter: Option<String>,
+    filter_cycle: Vec<String>,
     active_entry_id: Option<i64>,
     handles: HashMap<i64, iced_image::Handle>,
     highlights: HashMap<i64, HighlightedText>,
@@ -219,10 +225,23 @@ impl Overlay {
         let open_links =
             config.open_links_in_browser;
 
+        let mut filter_cycle =
+            vec!["Text".into(), "Images".into(), "URLs".into()];
+        let mut langs: Vec<String> = highlights
+            .values()
+            .map(|hl| hl.language.clone())
+            .filter(|l| l != "Plain Text")
+            .collect();
+        langs.sort();
+        langs.dedup();
+        filter_cycle.extend(langs);
+
         let overlay = Self {
             entries,
             search_query: String::new(),
             focused_index: 0,
+            type_filter: None,
+            filter_cycle,
             active_entry_id,
             handles,
             highlights,
@@ -272,6 +291,57 @@ impl Overlay {
             }
             Message::Backspace => {
                 self.search_query.pop();
+                self.focused_index = 0;
+            }
+            Message::CycleTypeFilter => {
+                let cycle = &self.filter_cycle;
+                self.type_filter = match &self.type_filter
+                {
+                    None if !cycle.is_empty() => {
+                        Some(cycle[0].clone())
+                    }
+                    Some(current) => {
+                        let pos = cycle
+                            .iter()
+                            .position(|f| f == current);
+                        match pos {
+                            Some(i)
+                                if i + 1
+                                    < cycle.len() =>
+                            {
+                                Some(
+                                    cycle[i + 1].clone(),
+                                )
+                            }
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
+                self.focused_index = 0;
+            }
+            Message::CycleTypeFilterReverse => {
+                let cycle = &self.filter_cycle;
+                self.type_filter = match &self.type_filter
+                {
+                    None if !cycle.is_empty() => {
+                        Some(cycle.last().unwrap().clone())
+                    }
+                    Some(current) => {
+                        let pos = cycle
+                            .iter()
+                            .position(|f| f == current);
+                        match pos {
+                            Some(0) | None => None,
+                            Some(i) => {
+                                Some(
+                                    cycle[i - 1].clone(),
+                                )
+                            }
+                        }
+                    }
+                    None => None,
+                };
                 self.focused_index = 0;
             }
             Message::CtrlState(held) => {
@@ -596,8 +666,47 @@ impl Overlay {
             .width(Length::Fixed(300.0))
             .center_x(Length::Fill);
 
+        let filter_label =
+            self.type_filter.as_deref();
+
         let paused = dbus::query_paused();
-        let header: Element<'_, Message> = if paused {
+
+        let mut header_row = Row::new()
+            .push(search_widget)
+            .spacing(8)
+            .align_y(alignment::Vertical::Center);
+
+        if let Some(label) = filter_label {
+            let badge = container(
+                text(label).size(12).color(
+                    Color::from_rgba8(
+                        100, 180, 255, 1.0,
+                    ),
+                ),
+            )
+            .padding([4, 8])
+            .style(|_theme: &iced::Theme| {
+                container::Style {
+                    background: Some(
+                        Color::from_rgba8(
+                            100, 180, 255, 0.15,
+                        )
+                        .into(),
+                    ),
+                    border: iced::Border {
+                        color: Color::from_rgba8(
+                            100, 180, 255, 0.6,
+                        ),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                }
+            });
+            header_row = header_row.push(badge);
+        }
+
+        if paused {
             let badge = container(
                 text("PAUSED")
                     .size(12)
@@ -624,15 +733,11 @@ impl Overlay {
                     ..Default::default()
                 }
             });
-            Row::new()
-                .push(search_widget)
-                .push(badge)
-                .spacing(8)
-                .align_y(alignment::Vertical::Center)
-                .into()
-        } else {
-            search_widget.into()
-        };
+            header_row = header_row.push(badge);
+        }
+
+        let header: Element<'_, Message> =
+            header_row.into();
 
         let layout: Element<'_, Message> = column![
             header,
@@ -664,8 +769,38 @@ impl Overlay {
     }
 
     fn filtered_entries(&self) -> Vec<&Entry> {
+        let type_match = |e: &&Entry| -> bool {
+            let Some(f) = &self.type_filter else {
+                return true;
+            };
+            match f.as_str() {
+                "Text" => {
+                    e.entry_type == EntryType::Text
+                }
+                "Images" => {
+                    e.entry_type == EntryType::Image
+                }
+                "URLs" => {
+                    e.entry_type == EntryType::Url
+                }
+                lang => {
+                    e.entry_type == EntryType::Text
+                        && self
+                            .highlights
+                            .get(&e.id)
+                            .is_some_and(|hl| {
+                                hl.language == lang
+                            })
+                }
+            }
+        };
+
         if self.search_query.is_empty() {
-            return self.entries.iter().collect();
+            return self
+                .entries
+                .iter()
+                .filter(type_match)
+                .collect();
         }
 
         let terms: Vec<String> = self
@@ -677,6 +812,7 @@ impl Overlay {
 
         self.entries
             .iter()
+            .filter(type_match)
             .filter(|e| {
                 let text_lower = e
                     .text_content()
@@ -685,15 +821,16 @@ impl Overlay {
                 let type_lower = self
                     .highlights
                     .get(&e.id)
-                    .map(|hl| hl.language.to_lowercase())
+                    .map(|hl| {
+                        hl.language.to_lowercase()
+                    })
                     .unwrap_or_default();
-                let entry_type = match &e.entry_type {
-                    crate::entry::EntryType::Image => {
-                        "image"
-                    }
-                    crate::entry::EntryType::Url => "url",
-                    crate::entry::EntryType::Text => "",
-                };
+                let entry_type =
+                    match &e.entry_type {
+                        EntryType::Image => "image",
+                        EntryType::Url => "url",
+                        EntryType::Text => "",
+                    };
 
                 terms.iter().all(|term| {
                     text_lower.contains(term)
@@ -1193,6 +1330,13 @@ fn input_subscription() -> Subscription<Message> {
                             }
                             Named::Backspace => {
                                 Some(Message::Backspace)
+                            }
+                            Named::Tab => {
+                                if modifiers.shift() {
+                                    Some(Message::CycleTypeFilterReverse)
+                                } else {
+                                    Some(Message::CycleTypeFilter)
+                                }
                             }
                             _ => None,
                         }
