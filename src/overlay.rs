@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use cosmic::iced::window;
 use cosmic::iced::{self, Element, Length, Subscription, Task};
 use cosmic::iced::widget::{
-    button, column, container, image as iced_image, row, scrollable,
-    text, text_input, Column,
+    button, column, container, image as iced_image, row,
+    scrollable, text, text_input, Column,
 };
 use cosmic::iced::alignment;
 use cosmic::iced_runtime::core::layout::Limits;
@@ -29,9 +31,8 @@ struct Overlay {
     entries: Vec<Entry>,
     search_query: String,
     focused_index: usize,
-    show_thumbnails: bool,
-    show_remote_thumbnails: bool,
     active_entry_id: Option<i64>,
+    handles: HashMap<i64, iced_image::Handle>,
 }
 
 impl Overlay {
@@ -44,7 +45,9 @@ impl Overlay {
         ) {
             Ok(db) => db,
             Err(e) => {
-                tracing::error!("Failed to open database: {e}");
+                tracing::error!(
+                    "Failed to open database: {e}"
+                );
                 panic!(
                     "Cannot open database at {}: {e}",
                     db_path.display()
@@ -58,14 +61,18 @@ impl Overlay {
         let active_entry_id =
             detect_active_entry(&entries);
 
+        let handles = build_handles(
+            &entries,
+            config.show_thumbnails,
+            config.show_remote_thumbnails,
+        );
+
         let overlay = Self {
             entries,
             search_query: String::new(),
             focused_index: 0,
-            show_thumbnails: config.show_thumbnails,
-            show_remote_thumbnails:
-                config.show_remote_thumbnails,
             active_entry_id,
+            handles,
         };
 
         let id = window::Id::unique();
@@ -90,7 +97,10 @@ impl Overlay {
         (overlay, init_task)
     }
 
-    fn update(&mut self, message: Message) -> Task<Message> {
+    fn update(
+        &mut self,
+        message: Message,
+    ) -> Task<Message> {
         match message {
             Message::SearchChanged(query) => {
                 self.search_query = query;
@@ -100,12 +110,15 @@ impl Overlay {
                 return Task::perform(
                     async move {
                         let action =
-                            dbus::PopupAction::SelectEntry { id };
+                            dbus::PopupAction::SelectEntry {
+                                id,
+                            };
                         if let Err(e) =
                             dbus::send_action(action).await
                         {
                             tracing::error!(
-                                "Failed to send selection: {e}"
+                                "Failed to send \
+                                 selection: {e}"
                             );
                         }
                     },
@@ -130,10 +143,11 @@ impl Overlay {
                 iced::keyboard::key::Named::ArrowUp => {
                     let filtered = self.filtered_entries();
                     if !filtered.is_empty() {
-                        self.focused_index = (self.focused_index
-                            + filtered.len()
-                            - 1)
-                            % filtered.len();
+                        self.focused_index =
+                            (self.focused_index
+                                + filtered.len()
+                                - 1)
+                                % filtered.len();
                     }
                 }
                 iced::keyboard::key::Named::Enter => {
@@ -153,11 +167,15 @@ impl Overlay {
         Task::none()
     }
 
-    fn view(&self, _id: window::Id) -> Element<'_, Message> {
-        let search = text_input("Search...", &self.search_query)
-            .on_input(Message::SearchChanged)
-            .padding(10)
-            .width(Length::Fill);
+    fn view(
+        &self,
+        _id: window::Id,
+    ) -> Element<'_, Message> {
+        let search =
+            text_input("Search...", &self.search_query)
+                .on_input(Message::SearchChanged)
+                .padding(10)
+                .width(Length::Fill);
 
         let filtered = self.filtered_entries();
 
@@ -168,23 +186,25 @@ impl Overlay {
                     .padding(20)
                     .into()
             } else {
-                let items: Vec<Element<'_, Message>> = filtered
-                    .iter()
-                    .enumerate()
-                    .map(|(i, entry)| {
-                        let is_focused = i == self.focused_index;
-                        let is_active =
-                            self.active_entry_id
-                                == Some(entry.id);
-                        entry_row(
-                            entry,
-                            is_focused,
-                            is_active,
-                            self.show_thumbnails,
-                            self.show_remote_thumbnails,
-                        )
-                    })
-                    .collect();
+                let items: Vec<Element<'_, Message>> =
+                    filtered
+                        .iter()
+                        .enumerate()
+                        .map(|(i, entry)| {
+                            let focused =
+                                i == self.focused_index;
+                            let active =
+                                self.active_entry_id
+                                    == Some(entry.id);
+                            let handle = self
+                                .handles
+                                .get(&entry.id);
+                            entry_row(
+                                entry, focused, active,
+                                handle,
+                            )
+                        })
+                        .collect();
 
                 scrollable(
                     Column::with_children(items).spacing(4),
@@ -194,14 +214,18 @@ impl Overlay {
             };
 
         container(
-            column![search, entries_list].spacing(8).padding(12),
+            column![search, entries_list]
+                .spacing(8)
+                .padding(12),
         )
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|theme: &iced::Theme| {
             let palette = theme.palette();
             container::Style {
-                background: Some(palette.background.into()),
+                background: Some(
+                    palette.background.into(),
+                ),
                 ..Default::default()
             }
         })
@@ -222,19 +246,53 @@ impl Overlay {
             .iter()
             .filter(|e| {
                 e.text_content()
-                    .map(|t| t.to_lowercase().contains(&query))
+                    .map(|t| {
+                        t.to_lowercase().contains(&query)
+                    })
                     .unwrap_or(false)
             })
             .collect()
     }
 }
 
+fn build_handles(
+    entries: &[Entry],
+    show_thumbnails: bool,
+    show_remote_thumbnails: bool,
+) -> HashMap<i64, iced_image::Handle> {
+    let mut map = HashMap::new();
+    for entry in entries {
+        let bytes = match &entry.entry_type {
+            crate::entry::EntryType::Image
+                if show_thumbnails =>
+            {
+                entry
+                    .image_data()
+                    .map(|(_mime, data)| data)
+            }
+            crate::entry::EntryType::Url
+                if show_remote_thumbnails =>
+            {
+                entry.thumbnail_data()
+            }
+            _ => None,
+        };
+        if let Some(data) = bytes {
+            let handle =
+                iced_image::Handle::from_bytes(
+                    data.to_vec(),
+                );
+            map.insert(entry.id, handle);
+        }
+    }
+    map
+}
+
 fn entry_row<'a>(
     entry: &'a Entry,
     focused: bool,
     active: bool,
-    show_thumbnails: bool,
-    show_remote_thumbnails: bool,
+    handle: Option<&iced_image::Handle>,
 ) -> Element<'a, Message> {
     use crate::entry::{EntryType, is_image_url};
 
@@ -245,23 +303,18 @@ fn entry_row<'a>(
         (false, false) => "",
     };
 
-    let content: Element<'a, Message> = match &entry.entry_type {
-        EntryType::Image => {
-            if show_thumbnails {
-                if let Some((_mime, data)) =
-                    entry.image_data()
-                {
-                    let handle =
-                        iced_image::Handle::from_bytes(
-                            data.to_vec(),
-                        );
+    let content: Element<'a, Message> =
+        match &entry.entry_type {
+            EntryType::Image => {
+                if let Some(h) = handle {
                     let thumbnail =
-                        iced_image::Image::new(handle)
+                        iced_image::Image::new(h.clone())
                             .width(48)
                             .height(48);
-                    let label =
-                        text(format!("{prefix}Copied Image"))
-                            .width(Length::Fill);
+                    let label = text(format!(
+                        "{prefix}Copied Image"
+                    ))
+                    .width(Length::Fill);
                     row![thumbnail, label]
                         .spacing(8)
                         .align_y(
@@ -274,27 +327,24 @@ fn entry_row<'a>(
                         .width(Length::Fill)
                         .into()
                 }
-            } else {
-                text(format!("{prefix}[Image]"))
-                    .width(Length::Fill)
-                    .into()
             }
-        }
-        EntryType::Url => {
-            let url =
-                entry.text_content().unwrap_or("[url]");
-            if show_remote_thumbnails && is_image_url(url) {
-                if let Some(data) = entry.thumbnail_data() {
-                    let handle =
-                        iced_image::Handle::from_bytes(
-                            data.to_vec(),
-                        );
+            EntryType::Url => {
+                let url = entry
+                    .text_content()
+                    .unwrap_or("[url]");
+                let is_img = is_image_url(url);
+                let emoji = if is_img {
+                    "\u{1f5bc}\u{fe0f}"
+                } else {
+                    "\u{1f517}"
+                };
+                if let Some(h) = handle {
                     let thumbnail =
-                        iced_image::Image::new(handle)
+                        iced_image::Image::new(h.clone())
                             .width(48)
                             .height(48);
                     let label = text(format!(
-                        "{prefix}\u{1f5bc}\u{fe0f} {url}"
+                        "{prefix}{emoji} {url}"
                     ))
                     .width(Length::Fill);
                     row![thumbnail, label]
@@ -306,32 +356,23 @@ fn entry_row<'a>(
                         .into()
                 } else {
                     text(format!(
-                        "{prefix}\u{1f5bc}\u{fe0f} {url}"
+                        "{prefix}{emoji} {url}"
                     ))
                     .width(Length::Fill)
                     .into()
                 }
-            } else {
-                let prefix = if is_image_url(url) {
-                    "\u{1f5bc}\u{fe0f}"
-                } else {
-                    "\u{1f517}"
-                };
-                text(format!("{prefix}{prefix} {url}"))
+            }
+            EntryType::Text => {
+                let content = entry
+                    .text_content()
+                    .unwrap_or("[empty]");
+                let truncated: String =
+                    content.chars().take(100).collect();
+                text(format!("{prefix}{truncated}"))
                     .width(Length::Fill)
                     .into()
             }
-        }
-        EntryType::Text => {
-            let content =
-                entry.text_content().unwrap_or("[empty]");
-            let truncated: String =
-                content.chars().take(100).collect();
-            text(format!("{prefix}{truncated}"))
-                .width(Length::Fill)
-                .into()
-        }
-    };
+        };
 
     let btn = button(content)
         .on_press(Message::SelectEntry(entry.id))
@@ -343,7 +384,8 @@ fn entry_row<'a>(
         container(btn)
             .style(move |theme: &iced::Theme| {
                 let palette = theme.palette();
-                let alpha = if is_active { 0.08 } else { 0.15 };
+                let alpha =
+                    if is_active { 0.08 } else { 0.15 };
                 let color = if is_active {
                     palette.success
                 } else {
@@ -351,8 +393,11 @@ fn entry_row<'a>(
                 };
                 container::Style {
                     background: Some(
-                        iced::Color { a: alpha, ..color }
-                            .into(),
+                        iced::Color {
+                            a: alpha,
+                            ..color
+                        }
+                        .into(),
                     ),
                     ..Default::default()
                 }
@@ -369,34 +414,15 @@ fn detect_active_entry(entries: &[Entry]) -> Option<i64> {
         .output()
         .ok()?;
 
-    if !output.status.success() || output.stdout.is_empty() {
+    if !output.status.success() || output.stdout.is_empty()
+    {
         return None;
     }
 
     let clip = &output.stdout;
     for entry in entries {
         if let Some(text) = entry.text_content() {
-            if text.as_bytes() == clip {
-                return Some(entry.id);
-            }
-        }
-    }
-
-    let img_output = std::process::Command::new("wl-paste")
-        .args(["--no-newline", "--type", "image"])
-        .output()
-        .ok()?;
-
-    if !img_output.status.success()
-        || img_output.stdout.is_empty()
-    {
-        return None;
-    }
-
-    let clip_img = &img_output.stdout;
-    for entry in entries {
-        if let Some((_mime, data)) = entry.image_data() {
-            if data == clip_img.as_slice() {
+            if text.as_bytes() == clip.as_slice() {
                 return Some(entry.id);
             }
         }
@@ -421,8 +447,9 @@ fn input_subscription() -> Subscription<Message> {
                         key, ..
                     },
                 ) => {
-                    if let iced::keyboard::Key::Named(named) =
-                        key
+                    if let iced::keyboard::Key::Named(
+                        named,
+                    ) = key
                     {
                         match named {
                             iced::keyboard::key::Named::Escape
