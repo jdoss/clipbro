@@ -5,6 +5,7 @@ mod db;
 mod dbus;
 mod entry;
 mod overlay;
+mod systemd;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{
@@ -32,6 +33,14 @@ enum Command {
     Hide,
     /// Initialize config and database
     Init,
+    /// Install systemd user service and enable it
+    Install,
+    /// Start the clipbro systemd service
+    Start,
+    /// Stop the clipbro systemd service
+    Stop,
+    /// Restart the clipbro systemd service
+    Restart,
     /// Clear clipboard history
     Clear,
     /// Store clipboard content (used by wl-paste --watch)
@@ -80,6 +89,18 @@ fn main() {
         Some(Command::Init) => {
             run_init();
         }
+        Some(Command::Install) => {
+            systemd::install();
+        }
+        Some(Command::Start) => {
+            systemd::start();
+        }
+        Some(Command::Stop) => {
+            systemd::stop();
+        }
+        Some(Command::Restart) => {
+            systemd::restart();
+        }
         Some(Command::Store { mime, source }) => {
             run_store(mime, source);
         }
@@ -96,6 +117,10 @@ fn main() {
                 Command::Hide => dbus::PopupAction::Hide,
                 Command::Clear => dbus::PopupAction::Clear,
                 Command::Init
+                | Command::Install
+                | Command::Start
+                | Command::Stop
+                | Command::Restart
                 | Command::Store { .. }
                 | Command::Overlay => unreachable!(),
 
