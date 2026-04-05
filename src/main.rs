@@ -41,6 +41,8 @@ enum Command {
     Stop,
     /// Restart the clipbro systemd service
     Restart,
+    /// Show clipbro systemd service status
+    Status,
     /// Clear clipboard history
     Clear,
     /// Store clipboard content (used by wl-paste --watch)
@@ -101,6 +103,9 @@ fn main() {
         Some(Command::Restart) => {
             systemd::restart();
         }
+        Some(Command::Status) => {
+            systemd::status();
+        }
         Some(Command::Store { mime, source }) => {
             run_store(mime, source);
         }
@@ -121,6 +126,7 @@ fn main() {
                 | Command::Start
                 | Command::Stop
                 | Command::Restart
+                | Command::Status
                 | Command::Store { .. }
                 | Command::Overlay => unreachable!(),
 

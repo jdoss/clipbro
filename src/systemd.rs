@@ -104,6 +104,106 @@ pub fn restart() {
     eprintln!("Restarted {UNIT_NAME}.");
 }
 
+pub fn status() {
+    let installed = unit_path().exists();
+    println!("Unit file: {}", if installed {
+        unit_path().display().to_string()
+    } else {
+        "not installed".to_string()
+    });
+
+    match get_unit_properties() {
+        Ok((load, active, sub, pid)) => {
+            println!("Loaded:    {load}");
+            println!("Active:    {active} ({sub})");
+            if pid > 0 {
+                println!("PID:       {pid}");
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("NoSuchUnit")
+                || msg.contains("not loaded")
+            {
+                println!("Loaded:    not-found");
+                println!("Active:    inactive");
+            } else {
+                eprintln!("Failed to query status: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn get_unit_properties()
+    -> Result<(String, String, String, u32), zbus::Error>
+{
+    let conn = session_conn()?;
+
+    let reply = conn.call_method(
+        Some(SYSTEMD_BUS),
+        SYSTEMD_PATH,
+        Some(MANAGER_IFACE),
+        "GetUnit",
+        &(UNIT_NAME,),
+    )?;
+    let unit_path: zbus::zvariant::OwnedObjectPath =
+        reply.body().deserialize()?;
+
+    let prop_iface =
+        "org.freedesktop.DBus.Properties";
+    let unit_iface =
+        "org.freedesktop.systemd1.Unit";
+    let svc_iface =
+        "org.freedesktop.systemd1.Service";
+
+    let load: String = get_property(
+        &conn, &unit_path, prop_iface, unit_iface,
+        "LoadState",
+    )?;
+    let active: String = get_property(
+        &conn, &unit_path, prop_iface, unit_iface,
+        "ActiveState",
+    )?;
+    let sub: String = get_property(
+        &conn, &unit_path, prop_iface, unit_iface,
+        "SubState",
+    )?;
+    let pid: u32 = get_property(
+        &conn, &unit_path, prop_iface, svc_iface,
+        "MainPID",
+    )?;
+
+    Ok((load, active, sub, pid))
+}
+
+fn get_property<T>(
+    conn: &zbus::blocking::Connection,
+    path: &zbus::zvariant::OwnedObjectPath,
+    prop_iface: &str,
+    target_iface: &str,
+    prop_name: &str,
+) -> Result<T, zbus::Error>
+where
+    T: TryFrom<zbus::zvariant::OwnedValue>,
+    T::Error: std::fmt::Display,
+{
+    let reply = conn.call_method(
+        Some(SYSTEMD_BUS),
+        path.as_ref(),
+        Some(prop_iface),
+        "Get",
+        &(target_iface, prop_name),
+    )?;
+    let val: zbus::zvariant::OwnedValue =
+        reply.body().deserialize()?;
+    T::try_from(val).map_err(|e| {
+        zbus::Error::Failure(format!(
+            "Property {prop_name}: {e}"
+        ))
+    })
+}
+
 fn session_conn() -> Result<
     zbus::blocking::Connection,
     zbus::Error,
