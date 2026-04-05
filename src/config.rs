@@ -3,23 +3,12 @@ use std::path::PathBuf;
 
 pub struct Config {
     pub max_entries: usize,
-    pub max_age_days: u32,
-    pub sync_primary: bool,
-    pub incognito: bool,
-    pub deny_list: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             max_entries: 500,
-            max_age_days: 30,
-            sync_primary: false,
-            incognito: false,
-            deny_list: vec![
-                "1password".into(),
-                "org.keepassxc.KeePassXC".into(),
-            ],
         }
     }
 }

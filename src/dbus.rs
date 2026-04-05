@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 
 use tokio::sync::mpsc;
 
-const BUS_NAME: &str = "io.github.jdoss.clipbro";
-const OBJECT_PATH: &str = "/io/github/jdoss/clipbro";
+pub const BUS_NAME: &str = "io.github.jdoss.clipbro";
+pub const OBJECT_PATH: &str = "/io/github/jdoss/clipbro";
 
 static VISIBLE: OnceLock<AtomicBool> = OnceLock::new();
 
@@ -24,6 +24,8 @@ pub enum PopupAction {
     Show,
     Hide,
     Clear,
+    Store { mime: String, content: Vec<u8> },
+    SelectEntry { id: i64 },
 }
 
 struct ClipbroDBus {
@@ -46,6 +48,14 @@ impl ClipbroDBus {
 
     async fn clear(&self) {
         let _ = self.tx.send(PopupAction::Clear);
+    }
+
+    async fn store(&self, mime: String, content: Vec<u8>) {
+        let _ = self.tx.send(PopupAction::Store { mime, content });
+    }
+
+    async fn select_entry(&self, id: i64) {
+        let _ = self.tx.send(PopupAction::SelectEntry { id });
     }
 
     #[zbus(property)]
@@ -75,21 +85,46 @@ pub async fn serve(
 pub async fn send_action(action: PopupAction) -> Result<(), zbus::Error> {
     let conn = zbus::Connection::session().await?;
 
-    let method = match action {
-        PopupAction::Toggle => "Toggle",
-        PopupAction::Show => "Show",
-        PopupAction::Hide => "Hide",
-        PopupAction::Clear => "Clear",
-    };
-
-    conn.call_method(
-        Some(BUS_NAME),
-        OBJECT_PATH,
-        Some("io.github.jdoss.clipbro"),
-        method,
-        &(),
-    )
-    .await?;
+    match action {
+        PopupAction::Store { mime, content } => {
+            conn.call_method(
+                Some(BUS_NAME),
+                OBJECT_PATH,
+                Some("io.github.jdoss.clipbro"),
+                "Store",
+                &(mime, content),
+            )
+            .await?;
+        }
+        PopupAction::SelectEntry { id } => {
+            conn.call_method(
+                Some(BUS_NAME),
+                OBJECT_PATH,
+                Some("io.github.jdoss.clipbro"),
+                "SelectEntry",
+                &(id,),
+            )
+            .await?;
+        }
+        _ => {
+            let method = match action {
+                PopupAction::Toggle => "Toggle",
+                PopupAction::Show => "Show",
+                PopupAction::Hide => "Hide",
+                PopupAction::Clear => "Clear",
+                PopupAction::Store { .. }
+                | PopupAction::SelectEntry { .. } => unreachable!(),
+            };
+            conn.call_method(
+                Some(BUS_NAME),
+                OBJECT_PATH,
+                Some("io.github.jdoss.clipbro"),
+                method,
+                &(),
+            )
+            .await?;
+        }
+    }
 
     Ok(())
 }

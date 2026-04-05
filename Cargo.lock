@@ -885,6 +885,7 @@ dependencies = [
  "chrono",
  "clap",
  "directories",
+ "libc",
  "libcosmic",
  "nucleo",
  "oo7",

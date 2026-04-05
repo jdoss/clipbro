@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::entry::{Entry, EntryType, MimeDataMap, detect_entry_type};
 
@@ -180,12 +180,45 @@ impl Database {
         Ok(map)
     }
 
+    pub fn get_entry(&self, id: i64) -> Result<Option<Entry>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, entry_type, favorite
+             FROM entries WHERE id = ?",
+        )?;
+
+        let entry = stmt
+            .query_row(params![id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                ))
+            })
+            .optional()?;
+
+        let Some((id, created_at, entry_type_str, favorite)) = entry
+        else {
+            return Ok(None);
+        };
+
+        let contents = self.load_contents(id)?;
+        Ok(Some(Entry {
+            id,
+            created_at,
+            entry_type: EntryType::from_str(&entry_type_str),
+            favorite,
+            contents,
+        }))
+    }
+
     pub fn delete(&self, id: i64) -> Result<(), DbError> {
         self.conn
             .execute("DELETE FROM entries WHERE id = ?", params![id])?;
         Ok(())
     }
 
+    #[allow(dead_code)] // UI favorite toggle not yet wired
     pub fn toggle_favorite(&self, id: i64) -> Result<(), DbError> {
         self.conn.execute(
             "UPDATE entries SET favorite = NOT favorite WHERE id = ?",
@@ -196,25 +229,6 @@ impl Database {
 
     pub fn clear(&self) -> Result<(), DbError> {
         self.conn.execute("DELETE FROM entries WHERE favorite = 0", [])?;
-        Ok(())
-    }
-
-    pub fn cleanup(&self, max_entries: usize, max_age_days: u32) -> Result<(), DbError> {
-        let cutoff = chrono::Utc::now().timestamp_millis()
-            - (max_age_days as i64 * 24 * 60 * 60 * 1000);
-
-        self.conn.execute(
-            "DELETE FROM entries WHERE favorite = 0 AND created_at < ?",
-            params![cutoff],
-        )?;
-
-        self.conn.execute(
-            "DELETE FROM entries WHERE favorite = 0 AND id NOT IN (
-                SELECT id FROM entries ORDER BY created_at DESC LIMIT ?
-            )",
-            params![max_entries as i64],
-        )?;
-
         Ok(())
     }
 }

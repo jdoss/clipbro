@@ -32,6 +32,7 @@ impl EntryType {
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub id: i64,
+    #[allow(dead_code)] // loaded from DB, used for sort/display
     pub created_at: i64,
     pub entry_type: EntryType,
     pub favorite: bool,
@@ -51,7 +52,9 @@ impl Entry {
         for mime in &text_mimes {
             if let Some(data) = self.contents.get(*mime) {
                 if let Ok(s) = std::str::from_utf8(data) {
-                    return Some(s);
+                    if !s.contains('\0') {
+                        return Some(s);
+                    }
                 }
             }
         }
@@ -83,12 +86,20 @@ pub fn detect_entry_type(data: &MimeDataMap) -> EntryType {
         return EntryType::Image;
     }
 
-    let text_content = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"]
-        .iter()
-        .find_map(|mime| {
-            data.get(*mime)
-                .and_then(|d| std::str::from_utf8(d).ok())
-        });
+    if data.contains_key("text/uri-list")
+        || data.contains_key("text/x-moz-url")
+    {
+        return EntryType::Url;
+    }
+
+    let text_content =
+        ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"]
+            .iter()
+            .find_map(|mime| {
+                data.get(*mime)
+                    .and_then(|d| std::str::from_utf8(d).ok())
+                    .filter(|s| !s.contains('\0'))
+            });
 
     if let Some(text) = text_content {
         let trimmed = text.trim();

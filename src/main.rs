@@ -1,15 +1,22 @@
-mod app;
 mod clipboard;
 mod config;
+mod daemon;
 mod db;
 mod dbus;
 mod entry;
+mod overlay;
 
 use clap::{Parser, Subcommand};
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    EnvFilter, fmt, layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 
 #[derive(Parser)]
-#[command(name = "clipbro", about = "Clipboard manager daemon with hotkey overlay")]
+#[command(
+    name = "clipbro",
+    about = "Clipboard manager daemon with hotkey overlay"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -25,40 +32,139 @@ enum Command {
     Hide,
     /// Clear clipboard history
     Clear,
+    /// Store clipboard content (used by wl-paste --watch)
+    Store {
+        #[arg(long, default_value = "text/plain")]
+        mime: String,
+    },
+    /// Open the overlay UI (spawned by daemon)
+    Overlay,
 }
 
 fn setup_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn,clipbro=info"));
-    let fmt_layer = fmt::layer().with_target(true);
+
+    let stderr_layer = fmt::layer().with_target(true);
+
+    let log_path = config::data_dir().join("clipbro.log");
+    let log_file = std::fs::File::create(&log_path).ok();
+    let file_layer = log_file.map(|f| {
+        fmt::layer()
+            .with_target(true)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(f))
+    });
+
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt_layer)
+        .with(stderr_layer)
+        .with(file_layer)
         .init();
+
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("PANIC: {info}");
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::error!("Backtrace:\n{bt}");
+    }));
 }
 
 fn main() {
-    setup_logging();
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Command::Store { mime }) => {
+            run_store(mime);
+        }
+        Some(Command::Overlay) => {
+            setup_logging();
+            tracing::info!("Starting overlay");
+            overlay::run();
+        }
         Some(command) => {
+            setup_logging();
             let action = match command {
                 Command::Toggle => dbus::PopupAction::Toggle,
                 Command::Show => dbus::PopupAction::Show,
                 Command::Hide => dbus::PopupAction::Hide,
                 Command::Clear => dbus::PopupAction::Clear,
+                Command::Store { .. }
+                | Command::Overlay => unreachable!(),
             };
 
             let rt = tokio::runtime::Runtime::new().unwrap();
-            if let Err(e) = rt.block_on(dbus::send_action(action)) {
+            if let Err(e) =
+                rt.block_on(dbus::send_action(action))
+            {
                 tracing::error!("Failed to send command: {e}");
                 std::process::exit(1);
             }
         }
         None => {
+            setup_logging();
             tracing::info!("Starting clipbro daemon");
-            app::run();
+
+            let db_path = config::db_path();
+            let db = match db::Database::open(&db_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to open database: {e}"
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(daemon::run(db));
         }
+    }
+}
+
+fn run_store(mime: String) {
+    use std::io::Read;
+    let mut content = Vec::new();
+    std::io::stdin().read_to_end(&mut content).unwrap_or(0);
+    if content.len() < 2 {
+        return;
+    }
+    if mime.starts_with("text/") && content.contains(&0) {
+        return;
+    }
+
+    let mime = detect_mime(&mime, &content);
+
+    let conn = match zbus::blocking::Connection::session() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = conn.call_method(
+        Some(dbus::BUS_NAME),
+        dbus::OBJECT_PATH,
+        Some("io.github.jdoss.clipbro"),
+        "Store",
+        &(mime, content),
+    );
+}
+
+fn detect_mime(hint: &str, data: &[u8]) -> String {
+    if hint != "image" {
+        return hint.to_string();
+    }
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png".to_string()
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg".to_string()
+    } else if data.starts_with(b"GIF8") {
+        "image/gif".to_string()
+    } else if data.starts_with(b"RIFF")
+        && data.len() > 12
+        && &data[8..12] == b"WEBP"
+    {
+        "image/webp".to_string()
+    } else if data.starts_with(b"BM") {
+        "image/bmp".to_string()
+    } else {
+        "image/png".to_string()
     }
 }
