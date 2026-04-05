@@ -8,14 +8,20 @@ pub struct Config {
     pub max_entries: usize,
     pub sync_selections: bool,
     pub encrypt_db: bool,
+    pub show_thumbnails: bool,
+    pub show_remote_thumbnails: bool,
+    pub max_thumbnail_bytes: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            max_entries: 500,
+            max_entries: 100,
             sync_selections: true,
             encrypt_db: true,
+            show_thumbnails: true,
+            show_remote_thumbnails: false,
+            max_thumbnail_bytes: 5 * 1024 * 1024,
         }
     }
 }

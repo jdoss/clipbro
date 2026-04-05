@@ -4,6 +4,8 @@ pub type Mime = String;
 pub type RawContent = Vec<u8>;
 pub type MimeDataMap = HashMap<Mime, RawContent>;
 
+pub const THUMBNAIL_MIME: &str = "x-clipbro/thumbnail";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryType {
     Text,
@@ -62,7 +64,8 @@ impl Entry {
     }
 
     pub fn image_data(&self) -> Option<(&str, &[u8])> {
-        let image_mimes = ["image/png", "image/jpeg", "image/jpg", "image/bmp"];
+        let image_mimes =
+            ["image/png", "image/jpeg", "image/jpg", "image/bmp"];
 
         for mime in &image_mimes {
             if let Some(data) = self.contents.get(*mime) {
@@ -71,11 +74,27 @@ impl Entry {
         }
         None
     }
+
+    pub fn thumbnail_data(&self) -> Option<&[u8]> {
+        self.contents
+            .get(THUMBNAIL_MIME)
+            .map(|d| d.as_slice())
+    }
 }
 
 static URL_PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"^https?://\S+$").unwrap()
 });
+
+static IMAGE_EXTENSIONS: &[&str] = &[
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg",
+];
+
+pub fn is_image_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    let path = lower.split(['?', '#']).next().unwrap_or(&lower);
+    IMAGE_EXTENSIONS.iter().any(|ext| path.ends_with(ext))
+}
 
 pub fn detect_entry_type(data: &MimeDataMap) -> EntryType {
     let has_image = data

@@ -1,8 +1,10 @@
 use cosmic::iced::window;
 use cosmic::iced::{self, Element, Length, Subscription, Task};
 use cosmic::iced::widget::{
-    column, container, scrollable, text, text_input, Column,
+    button, column, container, image as iced_image, row, scrollable,
+    text, text_input, Column,
 };
+use cosmic::iced::alignment;
 use cosmic::iced_runtime::core::layout::Limits;
 use cosmic::iced_runtime::platform_specific::wayland::layer_surface::SctkLayerSurfaceSettings;
 use cosmic::iced_winit::commands::layer_surface::{
@@ -27,6 +29,8 @@ struct Overlay {
     entries: Vec<Entry>,
     search_query: String,
     focused_index: usize,
+    show_thumbnails: bool,
+    show_remote_thumbnails: bool,
 }
 
 impl Overlay {
@@ -54,6 +58,9 @@ impl Overlay {
             entries,
             search_query: String::new(),
             focused_index: 0,
+            show_thumbnails: config.show_thumbnails,
+            show_remote_thumbnails:
+                config.show_remote_thumbnails,
         };
 
         let id = window::Id::unique();
@@ -161,7 +168,12 @@ impl Overlay {
                     .enumerate()
                     .map(|(i, entry)| {
                         let is_focused = i == self.focused_index;
-                        entry_row(entry, is_focused)
+                        entry_row(
+                            entry,
+                            is_focused,
+                            self.show_thumbnails,
+                            self.show_remote_thumbnails,
+                        )
                     })
                     .collect();
 
@@ -211,29 +223,102 @@ impl Overlay {
 fn entry_row<'a>(
     entry: &'a Entry,
     focused: bool,
+    show_thumbnails: bool,
+    show_remote_thumbnails: bool,
 ) -> Element<'a, Message> {
-    use cosmic::iced::widget::button;
+    use crate::entry::{EntryType, is_image_url};
 
-    let label = match &entry.entry_type {
-        crate::entry::EntryType::Text => {
-            let content =
-                entry.text_content().unwrap_or("[empty]");
-            content.chars().take(100).collect()
+    let fav = if entry.favorite { "\u{2b50} " } else { "" };
+
+    let content: Element<'a, Message> = match &entry.entry_type {
+        EntryType::Image => {
+            if show_thumbnails {
+                if let Some((_mime, data)) =
+                    entry.image_data()
+                {
+                    let handle =
+                        iced_image::Handle::from_bytes(
+                            data.to_vec(),
+                        );
+                    let thumbnail =
+                        iced_image::Image::new(handle)
+                            .width(48)
+                            .height(48);
+                    let label =
+                        text(format!("{fav}Copied Image"))
+                            .width(Length::Fill);
+                    row![thumbnail, label]
+                        .spacing(8)
+                        .align_y(
+                            alignment::Vertical::Center,
+                        )
+                        .width(Length::Fill)
+                        .into()
+                } else {
+                    text(format!("{fav}[Image]"))
+                        .width(Length::Fill)
+                        .into()
+                }
+            } else {
+                text(format!("{fav}[Image]"))
+                    .width(Length::Fill)
+                    .into()
+            }
         }
-        crate::entry::EntryType::Url => {
+        EntryType::Url => {
             let url =
                 entry.text_content().unwrap_or("[url]");
-            format!("\u{1f517} {url}")
+            if show_remote_thumbnails && is_image_url(url) {
+                if let Some(data) = entry.thumbnail_data() {
+                    let handle =
+                        iced_image::Handle::from_bytes(
+                            data.to_vec(),
+                        );
+                    let thumbnail =
+                        iced_image::Image::new(handle)
+                            .width(48)
+                            .height(48);
+                    let label = text(format!(
+                        "{fav}\u{1f5bc}\u{fe0f} {url}"
+                    ))
+                    .width(Length::Fill);
+                    row![thumbnail, label]
+                        .spacing(8)
+                        .align_y(
+                            alignment::Vertical::Center,
+                        )
+                        .width(Length::Fill)
+                        .into()
+                } else {
+                    text(format!(
+                        "{fav}\u{1f5bc}\u{fe0f} {url}"
+                    ))
+                    .width(Length::Fill)
+                    .into()
+                }
+            } else {
+                let prefix = if is_image_url(url) {
+                    "\u{1f5bc}\u{fe0f}"
+                } else {
+                    "\u{1f517}"
+                };
+                text(format!("{fav}{prefix} {url}"))
+                    .width(Length::Fill)
+                    .into()
+            }
         }
-        crate::entry::EntryType::Image => {
-            "[Image]".to_string()
+        EntryType::Text => {
+            let content =
+                entry.text_content().unwrap_or("[empty]");
+            let truncated: String =
+                content.chars().take(100).collect();
+            text(format!("{fav}{truncated}"))
+                .width(Length::Fill)
+                .into()
         }
     };
 
-    let fav = if entry.favorite { "\u{2b50} " } else { "" };
-    let display = format!("{fav}{label}");
-
-    let btn = button(text(display).width(Length::Fill))
+    let btn = button(content)
         .on_press(Message::SelectEntry(entry.id))
         .width(Length::Fill)
         .padding(8);

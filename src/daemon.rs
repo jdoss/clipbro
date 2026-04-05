@@ -9,6 +9,7 @@ use crate::clipboard;
 use crate::config::Config;
 use crate::db::Database;
 use crate::dbus::{self, PopupAction};
+use crate::entry;
 
 const DEDUP_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(2);
@@ -151,6 +152,14 @@ impl Daemon {
                                     Some((Instant::now(), id));
                             }
                         }
+
+                        if self.config.show_remote_thumbnails
+                            && !is_image
+                        {
+                            self.maybe_fetch_thumbnail(
+                                id, &content,
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::error!(
@@ -252,6 +261,52 @@ impl Daemon {
         dbus::set_visible(false);
     }
 
+    fn maybe_fetch_thumbnail(
+        &self,
+        entry_id: i64,
+        content: &[u8],
+    ) {
+        let text = match std::str::from_utf8(content) {
+            Ok(s) => s.trim(),
+            Err(_) => return,
+        };
+        if !entry::is_image_url(text) {
+            return;
+        }
+
+        let url = text.to_string();
+        let max_bytes = self.config.max_thumbnail_bytes;
+        let db = self.db.clone();
+
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(
+                move || fetch_thumbnail(&url, max_bytes),
+            )
+            .await;
+
+            let Some(bytes) = result.ok().flatten() else {
+                return;
+            };
+
+            let db = db.lock().await;
+            if let Err(e) = db.add_content(
+                entry_id,
+                entry::THUMBNAIL_MIME,
+                &bytes,
+            ) {
+                tracing::error!(
+                    "Failed to store thumbnail: {e}"
+                );
+            } else {
+                tracing::info!(
+                    "Cached thumbnail for entry {entry_id} \
+                     ({} bytes)",
+                    bytes.len()
+                );
+            }
+        });
+    }
+
     fn spawn_clipboard_watchers(&mut self) {
         let exe = std::env::current_exe().unwrap_or_else(|_| {
             std::path::PathBuf::from("clipbro")
@@ -348,6 +403,59 @@ impl Daemon {
             let _ = child.wait().await;
         }
         tracing::info!("Watchers stopped");
+    }
+}
+
+fn fetch_thumbnail(
+    url: &str,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let mut response = ureq::get(url)
+        .header("Accept", "image/*")
+        .call()
+        .ok()?;
+
+    let content_type = response
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("image/") {
+        tracing::debug!(
+            "Remote URL is not an image: {content_type}"
+        );
+        return None;
+    }
+
+    let length: usize = response
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if length > max_bytes {
+        tracing::debug!(
+            "Remote image too large: {length} bytes"
+        );
+        return None;
+    }
+
+    let mut buf = Vec::with_capacity(length);
+    let mut reader = response
+        .body_mut()
+        .with_config()
+        .limit(max_bytes as u64)
+        .reader();
+    match reader.read_to_end(&mut buf) {
+        Ok(_) => Some(buf),
+        Err(e) => {
+            tracing::debug!(
+                "Failed to read image body: {e}"
+            );
+            None
+        }
     }
 }
 

@@ -231,6 +231,20 @@ impl Database {
         }))
     }
 
+    pub fn add_content(
+        &self,
+        entry_id: i64,
+        mime: &str,
+        content: &[u8],
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO contents \
+             (entry_id, mime, content) VALUES (?, ?, ?)",
+            params![entry_id, mime, content],
+        )?;
+        Ok(())
+    }
+
     pub fn delete(&self, id: i64) -> Result<(), DbError> {
         self.conn
             .execute("DELETE FROM entries WHERE id = ?", params![id])?;
