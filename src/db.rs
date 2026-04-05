@@ -19,22 +19,18 @@ pub struct Database {
 }
 
 impl Database {
-    pub fn open(path: &Path) -> Result<Self, DbError> {
+    pub fn open(
+        path: &Path,
+        encrypt: bool,
+    ) -> Result<Self, DbError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let conn = Connection::open(path)?;
 
-        let key = match get_encryption_key() {
-            Ok(key) => key,
-            Err(e) => {
-                tracing::warn!("Keychain unavailable, using unencrypted DB: {e}");
-                String::new()
-            }
-        };
-
-        if !key.is_empty() {
+        if encrypt {
+            let key = get_encryption_key()?;
             conn.pragma_update(None, "key", &key)?;
         }
 

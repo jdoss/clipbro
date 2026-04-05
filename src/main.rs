@@ -107,18 +107,31 @@ fn main() {
             setup_logging();
             tracing::info!("Starting clipbro daemon");
 
+            let config = config::Config::load();
+
             let db_path = config::db_path();
-            let db = match db::Database::open(&db_path) {
+            let db = match db::Database::open(
+                &db_path,
+                config.encrypt_db,
+            ) {
                 Ok(db) => db,
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to open database: {e}"
-                    );
+                    if config.encrypt_db {
+                        tracing::error!(
+                            "Failed to open encrypted database: \
+                             {e}. Set encrypt_db = false in {} \
+                             or start your secret-service \
+                             provider.",
+                            config::config_path().display()
+                        );
+                    } else {
+                        tracing::error!(
+                            "Failed to open database: {e}"
+                        );
+                    }
                     std::process::exit(1);
                 }
             };
-
-            let config = config::Config::load();
 
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(daemon::run(db, config));

@@ -31,8 +31,12 @@ struct Overlay {
 
 impl Overlay {
     fn new() -> (Self, Task<Message>) {
+        let config = Config::load();
         let db_path = config::db_path();
-        let db = match Database::open(&db_path) {
+        let db = match Database::open(
+            &db_path,
+            config.encrypt_db,
+        ) {
             Ok(db) => db,
             Err(e) => {
                 tracing::error!("Failed to open database: {e}");
@@ -42,8 +46,6 @@ impl Overlay {
                 );
             }
         };
-
-        let config = Config::default();
         let entries = db
             .list_entries(config.max_entries)
             .unwrap_or_default();

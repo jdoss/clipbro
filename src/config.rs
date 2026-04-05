@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub max_entries: usize,
     pub sync_selections: bool,
+    pub encrypt_db: bool,
 }
 
 impl Default for Config {
@@ -14,6 +15,7 @@ impl Default for Config {
         Self {
             max_entries: 500,
             sync_selections: true,
+            encrypt_db: true,
         }
     }
 }
