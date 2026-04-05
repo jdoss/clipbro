@@ -566,7 +566,9 @@ pub fn is_image_url(url: &str) -> bool {
     IMAGE_EXTENSIONS.iter().any(|ext| path.ends_with(ext))
 }
 
-pub fn detect_entry_type(data: &MimeDataMap) -> EntryType {
+pub fn detect_entry_type(
+    data: &MimeDataMap,
+) -> EntryType {
     let has_image = data
         .keys()
         .any(|m| m.starts_with("image/"));
@@ -598,4 +600,398 @@ pub fn detect_entry_type(data: &MimeDataMap) -> EntryType {
     }
 
     EntryType::Text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry(
+        id: i64,
+        contents: MimeDataMap,
+    ) -> Entry {
+        Entry {
+            id,
+            created_at: 0,
+            entry_type: detect_entry_type(&contents),
+            favorite: false,
+            contents,
+        }
+    }
+
+    fn text_map(text: &str) -> MimeDataMap {
+        let mut m = MimeDataMap::new();
+        m.insert(
+            "text/plain;charset=utf-8".into(),
+            text.as_bytes().to_vec(),
+        );
+        m
+    }
+
+    fn image_map(mime: &str, data: &[u8]) -> MimeDataMap {
+        let mut m = MimeDataMap::new();
+        m.insert(mime.into(), data.to_vec());
+        m
+    }
+
+    // -- EntryType roundtrip --
+
+    #[test]
+    fn entry_type_roundtrip() {
+        for (variant, s) in [
+            (EntryType::Text, "text"),
+            (EntryType::Image, "image"),
+            (EntryType::Url, "url"),
+        ] {
+            assert_eq!(variant.as_str(), s);
+            assert_eq!(EntryType::from_str(s), variant);
+        }
+    }
+
+    #[test]
+    fn entry_type_unknown_defaults_to_text() {
+        assert_eq!(
+            EntryType::from_str("garbage"),
+            EntryType::Text,
+        );
+    }
+
+    // -- Entry::text_content --
+
+    #[test]
+    fn text_content_prefers_utf8_charset() {
+        let mut m = MimeDataMap::new();
+        m.insert(
+            "text/plain".into(),
+            b"fallback".to_vec(),
+        );
+        m.insert(
+            "text/plain;charset=utf-8".into(),
+            b"preferred".to_vec(),
+        );
+        let e = make_entry(1, m);
+        assert_eq!(e.text_content(), Some("preferred"));
+    }
+
+    #[test]
+    fn text_content_rejects_null_bytes() {
+        let mut m = MimeDataMap::new();
+        m.insert(
+            "text/plain;charset=utf-8".into(),
+            b"has\0null".to_vec(),
+        );
+        m.insert(
+            "text/plain".into(),
+            b"clean".to_vec(),
+        );
+        let e = make_entry(1, m);
+        assert_eq!(e.text_content(), Some("clean"));
+    }
+
+    #[test]
+    fn text_content_none_when_no_text_mimes() {
+        let e = make_entry(
+            1,
+            image_map("image/png", b"fakepng"),
+        );
+        assert!(e.text_content().is_none());
+    }
+
+    // -- Entry::image_data --
+
+    #[test]
+    fn image_data_prefers_png() {
+        let mut m = MimeDataMap::new();
+        m.insert("image/jpeg".into(), b"jpeg".to_vec());
+        m.insert("image/png".into(), b"png".to_vec());
+        let e = make_entry(1, m);
+        let (mime, data) = e.image_data().unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(data, b"png");
+    }
+
+    #[test]
+    fn image_data_none_without_images() {
+        let e = make_entry(1, text_map("hello"));
+        assert!(e.image_data().is_none());
+    }
+
+    // -- Entry::content_hash --
+
+    #[test]
+    fn content_hash_deterministic() {
+        let e1 = make_entry(1, text_map("same"));
+        let e2 = make_entry(2, text_map("same"));
+        assert_eq!(e1.content_hash(), e2.content_hash());
+    }
+
+    #[test]
+    fn content_hash_differs_for_different_content() {
+        let e1 = make_entry(1, text_map("alpha"));
+        let e2 = make_entry(2, text_map("beta"));
+        assert_ne!(e1.content_hash(), e2.content_hash());
+    }
+
+    // -- Entry::thumbnail_data --
+
+    #[test]
+    fn thumbnail_data_present() {
+        let mut m = text_map("hello");
+        m.insert(
+            THUMBNAIL_MIME.into(),
+            b"thumb".to_vec(),
+        );
+        let e = make_entry(1, m);
+        assert_eq!(e.thumbnail_data(), Some(b"thumb".as_slice()));
+    }
+
+    #[test]
+    fn thumbnail_data_absent() {
+        let e = make_entry(1, text_map("hello"));
+        assert!(e.thumbnail_data().is_none());
+    }
+
+    // -- detect_entry_type --
+
+    #[test]
+    fn detect_type_image() {
+        let m = image_map("image/png", b"data");
+        assert_eq!(detect_entry_type(&m), EntryType::Image);
+    }
+
+    #[test]
+    fn detect_type_uri_list() {
+        let mut m = MimeDataMap::new();
+        m.insert(
+            "text/uri-list".into(),
+            b"https://x.com".to_vec(),
+        );
+        assert_eq!(detect_entry_type(&m), EntryType::Url);
+    }
+
+    #[test]
+    fn detect_type_moz_url() {
+        let mut m = MimeDataMap::new();
+        m.insert(
+            "text/x-moz-url".into(),
+            b"https://x.com".to_vec(),
+        );
+        assert_eq!(detect_entry_type(&m), EntryType::Url);
+    }
+
+    #[test]
+    fn detect_type_plain_url() {
+        let m = text_map("https://example.com/page");
+        assert_eq!(detect_entry_type(&m), EntryType::Url);
+    }
+
+    #[test]
+    fn detect_type_plain_text() {
+        let m = text_map("just some text");
+        assert_eq!(detect_entry_type(&m), EntryType::Text);
+    }
+
+    #[test]
+    fn detect_type_image_wins_over_text() {
+        let mut m = text_map("hello");
+        m.insert("image/png".into(), b"img".to_vec());
+        assert_eq!(detect_entry_type(&m), EntryType::Image);
+    }
+
+    // -- is_image_url --
+
+    #[test]
+    fn is_image_url_png() {
+        assert!(is_image_url("https://example.com/pic.png"));
+    }
+
+    #[test]
+    fn is_image_url_jpeg_with_query() {
+        assert!(is_image_url(
+            "https://example.com/pic.jpeg?w=100"
+        ));
+    }
+
+    #[test]
+    fn is_image_url_with_fragment() {
+        assert!(is_image_url(
+            "https://example.com/pic.jpg#section"
+        ));
+    }
+
+    #[test]
+    fn is_image_url_case_insensitive() {
+        assert!(is_image_url("https://example.com/PIC.PNG"));
+    }
+
+    #[test]
+    fn is_image_url_not_image() {
+        assert!(!is_image_url("https://example.com/doc.pdf"));
+    }
+
+    #[test]
+    fn is_image_url_no_extension() {
+        assert!(!is_image_url("https://example.com/page"));
+    }
+
+    // -- guess_candidates --
+
+    #[test]
+    fn guess_candidates_empty() {
+        assert!(guess_candidates("").is_empty());
+        assert!(guess_candidates("   ").is_empty());
+    }
+
+    #[test]
+    fn guess_candidates_json_object() {
+        let c = guess_candidates(r#"{"key": "value"}"#);
+        assert!(c.contains(&"json"));
+    }
+
+    #[test]
+    fn guess_candidates_rust() {
+        let c = guess_candidates(
+            "fn main() {\n    let x = 42;\n}",
+        );
+        assert!(c.contains(&"rs"));
+    }
+
+    #[test]
+    fn guess_candidates_python_import() {
+        let c = guess_candidates(
+            "import os\nimport sys\n",
+        );
+        assert!(c.contains(&"py"));
+    }
+
+    #[test]
+    fn guess_candidates_python_def() {
+        let c = guess_candidates("def foo():\n    pass");
+        assert!(c.contains(&"py"));
+    }
+
+    #[test]
+    fn guess_candidates_shell_shebang() {
+        let c = guess_candidates("#!/bin/bash\necho hi");
+        assert!(c.contains(&"sh"));
+    }
+
+    #[test]
+    fn guess_candidates_go() {
+        let c = guess_candidates(
+            "package main\nfunc main() {}",
+        );
+        assert!(c.contains(&"go"));
+    }
+
+    #[test]
+    fn guess_candidates_javascript() {
+        let c = guess_candidates(
+            "const x = require('fs')\n",
+        );
+        assert!(c.contains(&"js"));
+    }
+
+    #[test]
+    fn guess_candidates_sql() {
+        let c = guess_candidates(
+            "SELECT * FROM users WHERE id = 1",
+        );
+        assert!(c.contains(&"sql"));
+    }
+
+    #[test]
+    fn guess_candidates_dockerfile() {
+        let c = guess_candidates(
+            "FROM ubuntu:22.04\nRUN apt-get update",
+        );
+        assert!(c.contains(&"dockerfile"));
+    }
+
+    #[test]
+    fn guess_candidates_toml() {
+        let c = guess_candidates(
+            "[package]\nname = \"foo\"\nversion = \"1.0\"",
+        );
+        assert!(c.contains(&"toml"));
+    }
+
+    #[test]
+    fn guess_candidates_yaml_frontmatter() {
+        let c = guess_candidates("---\nkey: value\n");
+        assert!(c.contains(&"yaml"));
+    }
+
+    #[test]
+    fn guess_candidates_css() {
+        let c = guess_candidates(
+            "body { color: red; display: flex; }",
+        );
+        assert!(c.contains(&"css"));
+    }
+
+    // -- guess_extension --
+
+    #[test]
+    fn guess_extension_none_for_plain() {
+        assert!(guess_extension("hello world").is_none());
+    }
+
+    #[test]
+    fn guess_extension_json() {
+        assert_eq!(
+            guess_extension(r#"{"a": 1}"#),
+            Some("json"),
+        );
+    }
+
+    #[test]
+    fn guess_extension_rust_with_treeitter() {
+        let code = "fn main() {\n    let x = 42;\n}\n";
+        assert_eq!(guess_extension(code), Some("rs"));
+    }
+
+    // -- highlight_text --
+
+    #[test]
+    fn highlight_text_returns_language_and_spans() {
+        let (lang, spans) = highlight_text(
+            r#"{"key": "value"}"#,
+            true,
+        );
+        assert_eq!(lang, "JSON");
+        assert!(!spans.is_empty());
+    }
+
+    #[test]
+    fn highlight_text_plain_text() {
+        let (lang, spans) =
+            highlight_text("just words", true);
+        assert!(!spans.is_empty());
+        assert_eq!(lang, "Plain Text");
+    }
+
+    // -- ext_to_display_name --
+
+    #[test]
+    fn ext_to_display_name_known() {
+        assert_eq!(ext_to_display_name("rs"), "Rust");
+        assert_eq!(ext_to_display_name("py"), "Python");
+        assert_eq!(ext_to_display_name("js"), "JavaScript");
+        assert_eq!(ext_to_display_name("go"), "Go");
+        assert_eq!(ext_to_display_name("sh"), "Shell");
+        assert_eq!(ext_to_display_name("json"), "JSON");
+        assert_eq!(ext_to_display_name("yaml"), "YAML");
+        assert_eq!(ext_to_display_name("toml"), "TOML");
+        assert_eq!(ext_to_display_name("sql"), "SQL");
+        assert_eq!(
+            ext_to_display_name("dockerfile"),
+            "Dockerfile",
+        );
+    }
+
+    #[test]
+    fn ext_to_display_name_unknown_passthrough() {
+        assert_eq!(ext_to_display_name("xyz"), "xyz");
+    }
 }

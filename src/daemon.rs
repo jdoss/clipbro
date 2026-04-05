@@ -602,6 +602,59 @@ fn hash_content(data: &[u8]) -> u64 {
     hasher.finish()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_content_deterministic() {
+        let data = b"hello world";
+        assert_eq!(
+            hash_content(data),
+            hash_content(data),
+        );
+    }
+
+    #[test]
+    fn hash_content_different_data() {
+        assert_ne!(
+            hash_content(b"alpha"),
+            hash_content(b"beta"),
+        );
+    }
+
+    #[test]
+    fn resize_to_thumbnail_valid_png() {
+        let img =
+            image::RgbaImage::new(512, 512);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(
+            &mut buf,
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let png_bytes = buf.into_inner();
+
+        let thumb =
+            resize_to_thumbnail(&png_bytes).unwrap();
+        assert!(!thumb.is_empty());
+        assert!(thumb.len() < png_bytes.len());
+
+        let decoded =
+            image::load_from_memory(&thumb).unwrap();
+        assert!(decoded.width() <= 256);
+        assert!(decoded.height() <= 256);
+    }
+
+    #[test]
+    fn resize_to_thumbnail_invalid_data() {
+        assert!(
+            resize_to_thumbnail(b"not an image")
+                .is_none()
+        );
+    }
+}
+
 pub async fn run(db: Database, config: Config) {
     dbus::init_visible();
 

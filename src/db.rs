@@ -127,7 +127,7 @@ impl Database {
             let mut stmt = self.conn.prepare(
                 "SELECT c.entry_id FROM contents c
                  WHERE c.mime IN (?, ?)
-                 AND TRIM(c.content) = ?
+                 AND TRIM(CAST(c.content AS TEXT)) = ?
                  LIMIT 1",
             )?;
 
@@ -135,7 +135,7 @@ impl Database {
                 params![
                     text_mimes[0],
                     text_mimes[1],
-                    trimmed.as_bytes(),
+                    &trimmed,
                 ],
                 |row| row.get::<_, i64>(0),
             ) {
@@ -355,6 +355,224 @@ impl Database {
     pub fn clear(&self) -> Result<(), DbError> {
         self.conn.execute("DELETE FROM entries WHERE favorite = 0", [])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn test_db() -> Database {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Database::open(&path, false).unwrap();
+        std::mem::forget(dir);
+        db
+    }
+
+    fn text_data(text: &str) -> MimeDataMap {
+        let mut m = HashMap::new();
+        m.insert(
+            "text/plain;charset=utf-8".into(),
+            text.as_bytes().to_vec(),
+        );
+        m
+    }
+
+    fn image_data(data: &[u8]) -> MimeDataMap {
+        let mut m = HashMap::new();
+        m.insert("image/png".into(), data.to_vec());
+        m
+    }
+
+    #[test]
+    fn insert_and_get_roundtrip() {
+        let db = test_db();
+        let data = text_data("hello world");
+        let id = db.insert(data).unwrap();
+
+        let entry = db.get_entry(id).unwrap().unwrap();
+        assert_eq!(entry.id, id);
+        assert_eq!(
+            entry.text_content(),
+            Some("hello world"),
+        );
+        assert_eq!(entry.entry_type, EntryType::Text);
+        assert!(!entry.favorite);
+    }
+
+    #[test]
+    fn insert_duplicate_text_returns_existing_id() {
+        let db = test_db();
+        let id1 = db.insert(text_data("same")).unwrap();
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+        let id2 = db.insert(text_data("same")).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn insert_duplicate_text_with_whitespace() {
+        let db = test_db();
+        let id1 = db.insert(text_data("hello")).unwrap();
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+        let id2 =
+            db.insert(text_data("  hello  ")).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn insert_duplicate_image_returns_existing_id() {
+        let db = test_db();
+        let png = b"fakepngdata";
+        let id1 = db.insert(image_data(png)).unwrap();
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+        let id2 = db.insert(image_data(png)).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn insert_duplicate_image() {
+        let db = test_db();
+        let png = b"fakepngdata";
+        let id1 = db.insert(image_data(png)).unwrap();
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+        let id2 = db.insert(image_data(png)).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn insert_different_text_different_ids() {
+        let db = test_db();
+        let id1 = db.insert(text_data("alpha")).unwrap();
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+        let id2 = db.insert(text_data("beta")).unwrap();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn list_entries_favorites_first() {
+        let db = test_db();
+        let id1 = db.insert(text_data("first")).unwrap();
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+        let _id2 = db.insert(text_data("second")).unwrap();
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+
+        db.toggle_favorite(id1).unwrap();
+
+        let entries = db.list_entries(10).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, id1);
+        assert!(entries[0].favorite);
+    }
+
+    #[test]
+    fn list_entries_light_skips_images() {
+        let db = test_db();
+        let mut m = text_data("hello");
+        m.insert("image/png".into(), b"imgdata".to_vec());
+        let id = db.insert(m).unwrap();
+
+        let light = db.list_entries_light(10).unwrap();
+        let entry = light.iter().find(|e| e.id == id).unwrap();
+        assert!(entry.image_data().is_none());
+        assert!(entry.text_content().is_some());
+    }
+
+    #[test]
+    fn touch_updates_timestamp() {
+        let db = test_db();
+        let id = db.insert(text_data("old")).unwrap();
+        let before = db
+            .get_entry(id)
+            .unwrap()
+            .unwrap()
+            .created_at;
+
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+        db.touch(id).unwrap();
+
+        let after = db
+            .get_entry(id)
+            .unwrap()
+            .unwrap()
+            .created_at;
+        assert!(after > before);
+    }
+
+    #[test]
+    fn toggle_favorite_on_and_off() {
+        let db = test_db();
+        let id = db.insert(text_data("fav")).unwrap();
+
+        assert!(!db.get_entry(id).unwrap().unwrap().favorite);
+        db.toggle_favorite(id).unwrap();
+        assert!(db.get_entry(id).unwrap().unwrap().favorite);
+        db.toggle_favorite(id).unwrap();
+        assert!(!db.get_entry(id).unwrap().unwrap().favorite);
+    }
+
+    #[test]
+    fn delete_removes_entry() {
+        let db = test_db();
+        let id = db.insert(text_data("gone")).unwrap();
+        db.delete(id).unwrap();
+        assert!(db.get_entry(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_removes_non_favorites_only() {
+        let db = test_db();
+        let fav_id =
+            db.insert(text_data("keeper")).unwrap();
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+        let _gone_id =
+            db.insert(text_data("disposable")).unwrap();
+
+        db.toggle_favorite(fav_id).unwrap();
+        db.clear().unwrap();
+
+        let entries = db.list_entries(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, fav_id);
+    }
+
+    #[test]
+    fn add_content_to_existing_entry() {
+        let db = test_db();
+        let id = db.insert(text_data("base")).unwrap();
+        db.add_content(id, "custom/mime", b"extra")
+            .unwrap();
+
+        let entry = db.get_entry(id).unwrap().unwrap();
+        assert_eq!(
+            entry.contents.get("custom/mime"),
+            Some(&b"extra".to_vec()),
+        );
+    }
+
+    #[test]
+    fn get_nonexistent_entry_returns_none() {
+        let db = test_db();
+        assert!(db.get_entry(999999).unwrap().is_none());
     }
 }
 

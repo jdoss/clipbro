@@ -267,3 +267,66 @@ fn detect_mime(hint: &str, data: &[u8]) -> String {
         "image/png".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_mime_png() {
+        let data = [0x89, 0x50, 0x4E, 0x47, 0x0D];
+        assert_eq!(detect_mime("image", &data), "image/png");
+    }
+
+    #[test]
+    fn detect_mime_jpeg() {
+        let data = [0xFF, 0xD8, 0xFF, 0xE0];
+        assert_eq!(
+            detect_mime("image", &data),
+            "image/jpeg",
+        );
+    }
+
+    #[test]
+    fn detect_mime_gif() {
+        assert_eq!(
+            detect_mime("image", b"GIF89a..."),
+            "image/gif",
+        );
+    }
+
+    #[test]
+    fn detect_mime_webp() {
+        let mut data = vec![0u8; 16];
+        data[..4].copy_from_slice(b"RIFF");
+        data[8..12].copy_from_slice(b"WEBP");
+        assert_eq!(
+            detect_mime("image", &data),
+            "image/webp",
+        );
+    }
+
+    #[test]
+    fn detect_mime_bmp() {
+        assert_eq!(
+            detect_mime("image", b"BM\x00\x00"),
+            "image/bmp",
+        );
+    }
+
+    #[test]
+    fn detect_mime_unknown_image_defaults_png() {
+        assert_eq!(
+            detect_mime("image", b"\x00\x00\x00\x00"),
+            "image/png",
+        );
+    }
+
+    #[test]
+    fn detect_mime_non_image_passthrough() {
+        assert_eq!(
+            detect_mime("text/plain", b"anything"),
+            "text/plain",
+        );
+    }
+}

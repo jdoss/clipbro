@@ -1045,6 +1045,74 @@ fn detect_cosmic_theme() -> iced::Theme {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_simple_key() {
+        let hk = ParsedHotkey::parse("delete");
+        assert!(!hk.ctrl);
+        assert!(!hk.alt);
+        assert!(!hk.shift);
+        assert_eq!(hk.key_char, "delete");
+    }
+
+    #[test]
+    fn parse_ctrl_key() {
+        let hk = ParsedHotkey::parse("ctrl+f");
+        assert!(hk.ctrl);
+        assert!(!hk.alt);
+        assert!(!hk.shift);
+        assert_eq!(hk.key_char, "f");
+    }
+
+    #[test]
+    fn parse_multiple_modifiers() {
+        let hk =
+            ParsedHotkey::parse("ctrl+shift+x");
+        assert!(hk.ctrl);
+        assert!(!hk.alt);
+        assert!(hk.shift);
+        assert_eq!(hk.key_char, "x");
+    }
+
+    #[test]
+    fn parse_all_modifiers() {
+        let hk =
+            ParsedHotkey::parse("ctrl+alt+shift+z");
+        assert!(hk.ctrl);
+        assert!(hk.alt);
+        assert!(hk.shift);
+        assert_eq!(hk.key_char, "z");
+    }
+
+    #[test]
+    fn parse_case_insensitive() {
+        let hk = ParsedHotkey::parse("Ctrl+F");
+        assert!(hk.ctrl);
+        assert_eq!(hk.key_char, "f");
+    }
+
+    #[test]
+    fn parse_with_spaces() {
+        let hk =
+            ParsedHotkey::parse("ctrl + shift + a");
+        assert!(hk.ctrl);
+        assert!(hk.shift);
+        assert_eq!(hk.key_char, "a");
+    }
+
+    #[test]
+    fn parse_alt_key() {
+        let hk = ParsedHotkey::parse("alt+s");
+        assert!(!hk.ctrl);
+        assert!(hk.alt);
+        assert!(!hk.shift);
+        assert_eq!(hk.key_char, "s");
+    }
+}
+
 pub fn run() {
     let result = iced::daemon(
         Overlay::new,

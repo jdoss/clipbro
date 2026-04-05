@@ -126,11 +126,83 @@ toggle_favorite = \"ctrl+f\"
 delete_entry = \"delete\"
 ";
 
-pub fn write_default_config() -> Result<PathBuf, std::io::Error> {
+pub fn write_default_config(
+) -> Result<PathBuf, std::io::Error> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, DEFAULT_CONFIG_TOML)?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_values() {
+        let c = Config::default();
+        assert_eq!(c.max_entries, 100);
+        assert!(c.sync_selections);
+        assert!(c.encrypt_db);
+        assert!(c.show_thumbnails);
+        assert!(!c.show_remote_thumbnails);
+        assert_eq!(c.max_thumbnail_bytes, 5 * 1024 * 1024);
+        assert_eq!(c.position, "top");
+        assert_eq!(
+            c.hotkeys.toggle_favorite,
+            "ctrl+f",
+        );
+        assert_eq!(c.hotkeys.delete_entry, "delete");
+    }
+
+    #[test]
+    fn toml_partial_fills_defaults() {
+        let toml = r#"max_entries = 50"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.max_entries, 50);
+        assert!(c.sync_selections);
+        assert_eq!(c.position, "top");
+    }
+
+    #[test]
+    fn toml_full_override() {
+        let toml = r#"
+max_entries = 200
+sync_selections = false
+encrypt_db = false
+show_thumbnails = false
+show_remote_thumbnails = true
+max_thumbnail_bytes = 1000
+position = "bottom"
+
+[hotkeys]
+toggle_favorite = "alt+s"
+delete_entry = "ctrl+d"
+"#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.max_entries, 200);
+        assert!(!c.sync_selections);
+        assert!(!c.encrypt_db);
+        assert!(!c.show_thumbnails);
+        assert!(c.show_remote_thumbnails);
+        assert_eq!(c.max_thumbnail_bytes, 1000);
+        assert_eq!(c.position, "bottom");
+        assert_eq!(c.hotkeys.toggle_favorite, "alt+s");
+        assert_eq!(c.hotkeys.delete_entry, "ctrl+d");
+    }
+
+    #[test]
+    fn write_default_config_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
+        let contents =
+            std::fs::read_to_string(&path).unwrap();
+        let c: Config =
+            toml::from_str(&contents).unwrap();
+        assert_eq!(c.max_entries, 100);
+        assert_eq!(c.position, "top");
+    }
 }
