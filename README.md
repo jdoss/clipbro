@@ -6,16 +6,21 @@ A clipboard manager for the COSMIC desktop environment. Clipbro runs as a backgr
 
 - **Card-based overlay** with image previews and syntax-highlighted code
 - **Favorites** pin entries so they survive clears and deletions. Toggle with Ctrl+F or click the star on any card. Favorited cards get a gold border and filled star
+- **Quick select** with Ctrl+1..9 to instantly copy the entry at that position. Index badges shown on each card
+- **Type filtering** with Tab/Shift+Tab to cycle through: Favorites, Text, Images, URLs, and detected code languages (Rust, JSON, Python, etc.)
+- **Open URLs in browser** with Ctrl+Enter or Ctrl+Click on URL entries (configurable)
+- **Pause clipboard monitoring** with Ctrl+P or `clipbro pause` to temporarily stop recording. Amber PAUSED badge shown in overlay
 - **Syntax highlighting** for 200+ languages including Rust, Python, Go, JavaScript, TypeScript, TOML, YAML, JSON, Dockerfile, Bash, SQL, CSS, Markdown, and more
 - **Language detection** identifies what you copied and labels each card (e.g., "Python", "TOML", "JSON")
 - **Image thumbnails** for copied images and optionally for image URLs
 - **Multi-term search** across content, language, and type. Type `python quickvm` to find Python entries containing "quickvm". Type `image` to filter to images only
 - **Instant search** starts filtering as you type, no need to click the search box
 - **Delete entries** with the Delete key. Favorites are protected and cannot be deleted
-- **Configurable hotkeys** for favorite toggle and entry deletion
+- **Configurable hotkeys** for favorite toggle, entry deletion, and pause
 - **Clipboard and primary selection sync** keeps both buffers in sync
 - **Encrypted database** with SQLCipher, key stored in your system keyring
 - **Configurable overlay position** at the top, bottom, left, or right edge of your screen
+- **Configurable database path** to store the database wherever you want
 - **COSMIC theme support** matches your system dark/light mode
 - **systemd integration** for starting on login
 
@@ -56,7 +61,7 @@ clipbro init
 
 This creates:
 - `~/.config/clipbro/config.toml` with commented defaults
-- `~/.local/share/clipbro/clipbro.db` (encrypted by default)
+- `~/.config/clipbro/clipbro.db` (encrypted by default)
 
 Install and enable the systemd user service:
 
@@ -80,17 +85,41 @@ Add a keyboard shortcut in COSMIC Settings that runs:
 clipbro toggle
 ```
 
-This opens and closes the overlay. When the overlay is open:
+This opens and closes the overlay.
 
-- **Arrow keys** navigate between cards (left/right for top/bottom bars, up/down for sidebars)
-- **Type** to search and filter cards instantly
-- **Backspace** to edit your search
-- **Escape** or **Enter** selects the focused card and copies it to your clipboard
-- **Ctrl+F** toggles favorite on the focused card
-- **Delete** removes the focused card (no-op on favorites)
-- **Click** a card to select it directly
-- **Click the star** on any card to toggle its favorite status
-- Clicking outside the overlay or losing focus also selects the focused card
+## Keyboard Shortcuts
+
+### Navigation
+
+| Key | Action |
+|-----|--------|
+| Arrow keys | Navigate between cards |
+| Type | Search and filter cards instantly |
+| Backspace | Edit your search |
+| Tab | Cycle type filter (Favorites → Text → Images → URLs → languages → All) |
+| Shift+Tab | Cycle type filter in reverse |
+
+### Selection
+
+| Key | Action |
+|-----|--------|
+| Enter | Select focused card and copy to clipboard |
+| Escape | Close overlay without changing clipboard |
+| Click | Select a card directly |
+| Ctrl+1..9 | Select entry by index position |
+| Ctrl+Enter | Open focused URL in default browser |
+| Ctrl+Click | Open clicked URL in default browser |
+
+### Actions
+
+| Key | Action |
+|-----|--------|
+| Ctrl+F | Toggle favorite on focused card |
+| Ctrl+P | Toggle pause on clipboard monitoring |
+| Delete | Remove focused card (favorites are protected) |
+| Click star | Toggle favorite on any card |
+
+Clicking outside the overlay or losing focus selects the focused card.
 
 ## Configuration
 
@@ -118,12 +147,21 @@ max_thumbnail_bytes = 5242880
 # Overlay position: "top", "bottom", "left", "right"
 position = "top"
 
+# Open URL entries in default browser with Ctrl+Enter or Ctrl+Click
+open_links_in_browser = true
+
+# Custom database path (default: ~/.config/clipbro/clipbro.db)
+# db_path = "/path/to/clipbro.db"
+
 [hotkeys]
 # Toggle favorite on the focused entry
 toggle_favorite = "ctrl+f"
 
 # Delete the focused entry (favorites are protected)
 delete_entry = "delete"
+
+# Toggle pause on clipboard monitoring
+pause = "ctrl+p"
 ```
 
 ### Overlay Position
@@ -136,6 +174,8 @@ The `position` setting controls where the overlay appears and how cards are arra
 | `bottom` | Horizontal cards along the bottom edge | Arrow Left/Right |
 | `left` | Vertical cards along the left edge | Arrow Up/Down |
 | `right` | Vertical cards along the right edge | Arrow Up/Down |
+
+In horizontal mode (top/bottom), the search bar is centered and fixed-width for comfortable use on ultrawide monitors.
 
 ### Image URL Thumbnails
 
@@ -163,6 +203,7 @@ clipbro toggle       Toggle the overlay (bind this to a hotkey)
 clipbro show         Open the overlay
 clipbro hide         Close the overlay
 clipbro clear        Delete all non-favorite clipboard entries
+clipbro pause        Toggle pause on clipboard monitoring
 ```
 
 ## Files
@@ -170,7 +211,7 @@ clipbro clear        Delete all non-favorite clipboard entries
 | Path | Purpose |
 |------|---------|
 | `~/.config/clipbro/config.toml` | Configuration |
-| `~/.local/share/clipbro/clipbro.db` | Clipboard database |
+| `~/.config/clipbro/clipbro.db` | Clipboard database |
 | `~/.local/share/clipbro/clipbro.log` | Log file |
 | `~/.config/systemd/user/clipbro.service` | systemd unit (created by `clipbro install`) |
 
