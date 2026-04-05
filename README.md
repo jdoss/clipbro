@@ -2,6 +2,8 @@
 
 A clipboard manager for the COSMIC desktop environment. Clipbro runs as a background daemon, keeps a history of everything you copy, and shows a card-based overlay when you need to find something.
 
+![Clipbro overlay showing clipboard history with syntax-highlighted code, images, and URLs](assets/example.png)
+
 ## Features
 
 - **Card-based overlay** with image previews and syntax-highlighted code
@@ -13,7 +15,7 @@ A clipboard manager for the COSMIC desktop environment. Clipbro runs as a backgr
 - **Syntax highlighting** for 200+ languages including Rust, Python, Go, JavaScript, TypeScript, TOML, YAML, JSON, Dockerfile, Bash, SQL, CSS, Markdown, and more
 - **Language detection** identifies what you copied and labels each card (e.g., "Python", "TOML", "JSON")
 - **Image thumbnails** for copied images and optionally for image URLs
-- **Multi-term search** across content, language, and type. Type `python quickvm` to find Python entries containing "quickvm". Type `image` to filter to images only
+- **Multi-term search** across content, language, and type. Type `python htmx` to find Python entries containing "htmx". Type `image` to filter to images only
 - **Instant search** starts filtering as you type, no need to click the search box
 - **Delete entries** with the Delete key. Favorites are protected and cannot be deleted
 - **Configurable hotkeys** for favorite toggle, entry deletion, and pause
