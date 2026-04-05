@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::window;
-use cosmic::iced::{self, Element, Length, Subscription, Task};
+use cosmic::iced::{self, ContentFit, Element, Length, Subscription, Task};
 use cosmic::iced::widget::{
     button, column, container, image as iced_image, row,
-    scrollable, text, text_input, Column,
+    scrollable, text, text_input, Column, Row,
 };
 use cosmic::iced::alignment;
 use cosmic::iced_runtime::core::layout::Limits;
@@ -18,11 +19,21 @@ use crate::db::Database;
 use crate::dbus;
 use crate::entry::Entry;
 
+const CARD_WIDTH: f32 = 340.0;
+const CARD_HEIGHT_VERT: f32 = 200.0;
+const CARD_PADDING: u16 = 4;
+const CARD_SPACING: u16 = 8;
+
+const BAR_THICKNESS: u32 = 400;
+const SIDEBAR_WIDTH: u32 = 320;
+
 #[derive(Debug, Clone)]
 enum Message {
     SearchChanged(String),
     SelectEntry(i64),
-    KeyEvent(iced::keyboard::key::Named),
+    NavForward,
+    NavBackward,
+    Dismiss,
     Unfocused,
     SelectionSent,
 }
@@ -33,6 +44,7 @@ struct Overlay {
     focused_index: usize,
     active_entry_id: Option<i64>,
     handles: HashMap<i64, iced_image::Handle>,
+    horizontal: bool,
 }
 
 impl Overlay {
@@ -54,8 +66,9 @@ impl Overlay {
                 );
             }
         };
+        let display_limit = config.max_entries.min(20);
         let entries = db
-            .list_entries_light(config.max_entries)
+            .list_entries_light(display_limit)
             .unwrap_or_default();
 
         let active_entry_id =
@@ -67,26 +80,34 @@ impl Overlay {
             config.show_remote_thumbnails,
         );
 
+        let horizontal = matches!(
+            config.position.as_str(),
+            "top" | "bottom"
+        );
+
         let overlay = Self {
             entries,
             search_query: String::new(),
             focused_index: 0,
             active_entry_id,
             handles,
+            horizontal,
         };
 
         let id = window::Id::unique();
+
+        let (anchor, size) = position_settings(
+            &config.position,
+        );
 
         let init_task = get_layer_surface(
             SctkLayerSurfaceSettings {
                 id,
                 keyboard_interactivity:
                     KeyboardInteractivity::Exclusive,
-                anchor: layer_surface::Anchor::TOP
-                    | layer_surface::Anchor::LEFT
-                    | layer_surface::Anchor::RIGHT,
+                anchor,
                 namespace: "clipbro".into(),
-                size: Some((None, Some(400))),
+                size,
                 size_limits: Limits::NONE
                     .min_width(1.0)
                     .min_height(1.0),
@@ -125,46 +146,47 @@ impl Overlay {
                     |_| Message::SelectionSent,
                 );
             }
-            Message::Unfocused | Message::SelectionSent => {
+            Message::SelectionSent => {
                 return iced::exit();
             }
-            Message::KeyEvent(key) => match key {
-                iced::keyboard::key::Named::Escape => {
-                    return iced::exit();
+            Message::Dismiss | Message::Unfocused => {
+                return self.select_focused_and_exit();
+            }
+            Message::NavForward => {
+                let filtered = self.filtered_entries();
+                if !filtered.is_empty() {
+                    self.focused_index =
+                        (self.focused_index + 1)
+                            % filtered.len();
                 }
-                iced::keyboard::key::Named::ArrowDown => {
-                    let filtered = self.filtered_entries();
-                    if !filtered.is_empty() {
-                        self.focused_index =
-                            (self.focused_index + 1)
-                                % filtered.len();
-                    }
+            }
+            Message::NavBackward => {
+                let filtered = self.filtered_entries();
+                if !filtered.is_empty() {
+                    self.focused_index =
+                        (self.focused_index
+                            + filtered.len()
+                            - 1)
+                            % filtered.len();
                 }
-                iced::keyboard::key::Named::ArrowUp => {
-                    let filtered = self.filtered_entries();
-                    if !filtered.is_empty() {
-                        self.focused_index =
-                            (self.focused_index
-                                + filtered.len()
-                                - 1)
-                                % filtered.len();
-                    }
-                }
-                iced::keyboard::key::Named::Enter => {
-                    let filtered = self.filtered_entries();
-                    if let Some(entry) =
-                        filtered.get(self.focused_index)
-                    {
-                        let id = entry.id;
-                        return Task::done(
-                            Message::SelectEntry(id),
-                        );
-                    }
-                }
-                _ => {}
-            },
+            }
         }
         Task::none()
+    }
+
+    fn select_focused_and_exit(&self) -> Task<Message> {
+        let filtered = self.filtered_entries();
+        if let Some(entry) =
+            filtered.get(self.focused_index)
+        {
+            let id = entry.id;
+            if self.active_entry_id != Some(id) {
+                return Task::done(
+                    Message::SelectEntry(id),
+                );
+            }
+        }
+        iced::exit()
     }
 
     fn view(
@@ -174,62 +196,95 @@ impl Overlay {
         let search =
             text_input("Search...", &self.search_query)
                 .on_input(Message::SearchChanged)
-                .padding(10)
-                .width(Length::Fill);
+                .padding(10);
 
         let filtered = self.filtered_entries();
 
-        let entries_list: Element<'_, Message> =
+        let cards_widget: Element<'_, Message> =
             if filtered.is_empty() {
                 container(text("No clipboard entries"))
                     .center_x(Length::Fill)
-                    .padding(20)
+                    .center_y(Length::Fill)
                     .into()
             } else {
-                let items: Vec<Element<'_, Message>> =
+                let cards: Vec<Element<'_, Message>> =
                     filtered
                         .iter()
                         .enumerate()
                         .map(|(i, entry)| {
-                            let focused =
-                                i == self.focused_index;
-                            let active =
+                            entry_card(
+                                entry,
+                                i == self.focused_index,
                                 self.active_entry_id
-                                    == Some(entry.id);
-                            let handle = self
-                                .handles
-                                .get(&entry.id);
-                            entry_row(
-                                entry, focused, active,
-                                handle,
+                                    == Some(entry.id),
+                                self.handles
+                                    .get(&entry.id),
+                                self.horizontal,
                             )
                         })
                         .collect();
 
-                scrollable(
-                    Column::with_children(items).spacing(4),
-                )
-                .height(Length::Fill)
-                .into()
+                if self.horizontal {
+                    scrollable(
+                        Row::with_children(cards)
+                            .spacing(CARD_SPACING),
+                    )
+                    .direction(
+                        scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::new(),
+                        ),
+                    )
+                    .height(Length::Fill)
+                    .into()
+                } else {
+                    scrollable(
+                        Column::with_children(cards)
+                            .spacing(CARD_SPACING),
+                    )
+                    .height(Length::Fill)
+                    .into()
+                }
             };
 
-        container(
-            column![search, entries_list]
-                .spacing(8)
-                .padding(12),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|theme: &iced::Theme| {
-            let palette = theme.palette();
-            container::Style {
-                background: Some(
-                    palette.background.into(),
-                ),
-                ..Default::default()
-            }
-        })
-        .into()
+        let search_widget: Element<'_, Message> =
+            if self.horizontal {
+                container(search)
+                    .width(Length::Fixed(250.0))
+                    .into()
+            } else {
+                container(search)
+                    .width(Length::Fill)
+                    .into()
+            };
+
+        let layout: Element<'_, Message> =
+            if self.horizontal {
+                row![search_widget, cards_widget]
+                    .spacing(8)
+                    .padding(12)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                column![search_widget, cards_widget]
+                    .spacing(8)
+                    .padding(12)
+                    .width(Length::Fill)
+                    .into()
+            };
+
+        container(layout)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|theme: &iced::Theme| {
+                let palette = theme.palette();
+                container::Style {
+                    background: Some(
+                        palette.background.into(),
+                    ),
+                    ..Default::default()
+                }
+            })
+            .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -252,6 +307,38 @@ impl Overlay {
                     .unwrap_or(false)
             })
             .collect()
+    }
+}
+
+fn position_settings(
+    position: &str,
+) -> (layer_surface::Anchor, Option<(Option<u32>, Option<u32>)>)
+{
+    match position {
+        "bottom" => (
+            layer_surface::Anchor::BOTTOM
+                | layer_surface::Anchor::LEFT
+                | layer_surface::Anchor::RIGHT,
+            Some((None, Some(BAR_THICKNESS))),
+        ),
+        "left" => (
+            layer_surface::Anchor::TOP
+                | layer_surface::Anchor::LEFT
+                | layer_surface::Anchor::BOTTOM,
+            Some((Some(SIDEBAR_WIDTH), None)),
+        ),
+        "right" => (
+            layer_surface::Anchor::TOP
+                | layer_surface::Anchor::RIGHT
+                | layer_surface::Anchor::BOTTOM,
+            Some((Some(SIDEBAR_WIDTH), None)),
+        ),
+        _ => (
+            layer_surface::Anchor::TOP
+                | layer_surface::Anchor::LEFT
+                | layer_surface::Anchor::RIGHT,
+            Some((None, Some(BAR_THICKNESS))),
+        ),
     }
 }
 
@@ -285,124 +372,181 @@ fn build_handles(
     map
 }
 
-fn entry_row<'a>(
+fn entry_card<'a>(
     entry: &'a Entry,
     focused: bool,
     active: bool,
     handle: Option<&iced_image::Handle>,
+    horizontal: bool,
 ) -> Element<'a, Message> {
     use crate::entry::{EntryType, is_image_url};
 
-    let prefix = match (active, entry.favorite) {
-        (true, true) => "\u{1f4cb} \u{2b50} ",
-        (true, false) => "\u{1f4cb} ",
-        (false, true) => "\u{2b50} ",
+    let badge = match (active, entry.favorite) {
+        (true, true) => "\u{1f4cb} \u{2b50}",
+        (true, false) => "\u{1f4cb}",
+        (false, true) => "\u{2b50}",
         (false, false) => "",
     };
 
-    let content: Element<'a, Message> =
-        match &entry.entry_type {
-            EntryType::Image => {
-                if let Some(h) = handle {
-                    let thumbnail =
-                        iced_image::Image::new(h.clone())
-                            .width(48)
-                            .height(48);
-                    let label = text(format!(
-                        "{prefix}Copied Image"
-                    ))
-                    .width(Length::Fill);
-                    row![thumbnail, label]
-                        .spacing(8)
-                        .align_y(
-                            alignment::Vertical::Center,
-                        )
+    let has_badge = !badge.is_empty();
+
+    let body: Element<'a, Message> = match &entry.entry_type
+    {
+        EntryType::Image => {
+            if let Some(h) = handle {
+                column![
+                    iced_image::Image::new(h.clone())
+                        .content_fit(ContentFit::Contain)
                         .width(Length::Fill)
-                        .into()
-                } else {
-                    text(format!("{prefix}[Image]"))
+                        .height(Length::FillPortion(4)),
+                    text("Image")
+                        .size(12)
                         .width(Length::Fill)
-                        .into()
-                }
-            }
-            EntryType::Url => {
-                let url = entry
-                    .text_content()
-                    .unwrap_or("[url]");
-                let is_img = is_image_url(url);
-                let emoji = if is_img {
-                    "\u{1f5bc}\u{fe0f}"
-                } else {
-                    "\u{1f517}"
-                };
-                if let Some(h) = handle {
-                    let thumbnail =
-                        iced_image::Image::new(h.clone())
-                            .width(48)
-                            .height(48);
-                    let label = text(format!(
-                        "{prefix}{emoji} {url}"
-                    ))
-                    .width(Length::Fill);
-                    row![thumbnail, label]
-                        .spacing(8)
-                        .align_y(
-                            alignment::Vertical::Center,
-                        )
-                        .width(Length::Fill)
-                        .into()
-                } else {
-                    text(format!(
-                        "{prefix}{emoji} {url}"
-                    ))
-                    .width(Length::Fill)
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(4)
+                .align_x(alignment::Horizontal::Center)
+                .into()
+            } else {
+                container(text("[Image]"))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
                     .into()
-                }
             }
-            EntryType::Text => {
-                let content = entry
-                    .text_content()
-                    .unwrap_or("[empty]");
-                let truncated: String =
-                    content.chars().take(100).collect();
-                text(format!("{prefix}{truncated}"))
-                    .width(Length::Fill)
-                    .into()
+        }
+        EntryType::Url => {
+            let url =
+                entry.text_content().unwrap_or("[url]");
+            let emoji = if is_image_url(url) {
+                "\u{1f5bc}\u{fe0f} "
+            } else {
+                "\u{1f517} "
+            };
+            if let Some(h) = handle {
+                column![
+                    iced_image::Image::new(h.clone())
+                        .content_fit(ContentFit::Contain)
+                        .width(Length::Fill)
+                        .height(Length::FillPortion(3)),
+                    text(format!("{emoji}{url}"))
+                        .size(12)
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                ]
+                .spacing(4)
+                .into()
+            } else {
+                container(
+                    text(format!("{emoji}{url}"))
+                        .size(13)
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                )
+                .padding(4)
+                .into()
+            }
+        }
+        EntryType::Text => {
+            let content =
+                entry.text_content().unwrap_or("[empty]");
+            let truncated: String =
+                content.chars().take(200).collect();
+            container(
+                text(truncated)
+                    .size(13)
+                    .wrapping(Wrapping::Word)
+                    .width(Length::Fill),
+            )
+            .padding(4)
+            .into()
+        }
+    };
+
+    let mut card_content = Column::new()
+        .spacing(2)
+        .width(Length::Fill)
+        .height(Length::Fill);
+    if has_badge {
+        card_content =
+            card_content.push(text(badge).size(12));
+    }
+    card_content = card_content.push(body);
+
+    let (card_w, card_h) = if horizontal {
+        (
+            Length::Fixed(CARD_WIDTH),
+            Length::Fill,
+        )
+    } else {
+        (
+            Length::Fill,
+            Length::Fixed(CARD_HEIGHT_VERT),
+        )
+    };
+
+    let btn_style =
+        move |theme: &iced::Theme,
+              _status: button::Status|
+              -> button::Style {
+            let palette = theme.palette();
+            let (bg, border) = if focused {
+                (
+                    iced::Color {
+                        a: 0.20,
+                        ..palette.primary
+                    }
+                    .into(),
+                    iced::Border {
+                        color: palette.primary,
+                        width: 3.0,
+                        radius: 8.0.into(),
+                    },
+                )
+            } else if active {
+                (
+                    iced::Color {
+                        a: 0.10,
+                        ..palette.success
+                    }
+                    .into(),
+                    iced::Border {
+                        color: palette.success,
+                        width: 2.0,
+                        radius: 8.0.into(),
+                    },
+                )
+            } else {
+                (
+                    iced::Color {
+                        a: 0.05,
+                        ..palette.text
+                    }
+                    .into(),
+                    iced::Border {
+                        color: iced::Color {
+                            a: 0.15,
+                            ..palette.text
+                        },
+                        width: 1.0,
+                        radius: 8.0.into(),
+                    },
+                )
+            };
+            button::Style {
+                background: Some(bg),
+                border,
+                text_color: palette.text,
+                ..Default::default()
             }
         };
 
-    let btn = button(content)
+    button(card_content)
         .on_press(Message::SelectEntry(entry.id))
-        .width(Length::Fill)
-        .padding(8);
-
-    if focused || active {
-        let is_active = active;
-        container(btn)
-            .style(move |theme: &iced::Theme| {
-                let palette = theme.palette();
-                let alpha =
-                    if is_active { 0.08 } else { 0.15 };
-                let color = if is_active {
-                    palette.success
-                } else {
-                    palette.primary
-                };
-                container::Style {
-                    background: Some(
-                        iced::Color {
-                            a: alpha,
-                            ..color
-                        }
-                        .into(),
-                    ),
-                    ..Default::default()
-                }
-            })
-            .into()
-    } else {
-        btn.into()
-    }
+        .width(card_w)
+        .height(card_h)
+        .padding(CARD_PADDING)
+        .style(btn_style)
+        .into()
 }
 
 fn detect_active_entry(entries: &[Entry]) -> Option<i64> {
@@ -418,8 +562,8 @@ fn detect_active_entry(entries: &[Entry]) -> Option<i64> {
 
     let clip = &output.stdout;
     for entry in entries {
-        if let Some(text) = entry.text_content() {
-            if text.as_bytes() == clip.as_slice() {
+        if let Some(t) = entry.text_content() {
+            if t.as_bytes() == clip.as_slice() {
                 return Some(entry.id);
             }
         }
@@ -430,47 +574,51 @@ fn detect_active_entry(entries: &[Entry]) -> Option<i64> {
 
 fn input_subscription() -> Subscription<Message> {
     cosmic::iced_futures::event::listen_with(
-        |event, status, _| {
-            if matches!(
-                status,
-                iced::event::Status::Captured
-            ) {
-                return None;
-            }
-
-            match event {
-                iced::Event::Keyboard(
-                    iced::keyboard::Event::KeyPressed {
-                        key, ..
-                    },
-                ) => {
-                    if let iced::keyboard::Key::Named(
-                        named,
-                    ) = key
-                    {
-                        match named {
-                            iced::keyboard::key::Named::Escape
-                            | iced::keyboard::key::Named::ArrowUp
-                            | iced::keyboard::key::Named::ArrowDown
-                            | iced::keyboard::key::Named::Enter => {
-                                Some(Message::KeyEvent(named))
-                            }
-                            _ => None,
+        |event, status, _| match &event {
+            iced::Event::Keyboard(
+                iced::keyboard::Event::KeyPressed {
+                    key, ..
+                },
+            ) => {
+                if let iced::keyboard::Key::Named(named) =
+                    key
+                {
+                    use iced::keyboard::key::Named;
+                    match named {
+                        Named::Escape | Named::Enter => {
+                            Some(Message::Dismiss)
                         }
-                    } else {
-                        None
+                        Named::ArrowRight
+                        | Named::ArrowDown => {
+                            Some(Message::NavForward)
+                        }
+                        Named::ArrowLeft
+                        | Named::ArrowUp => {
+                            Some(Message::NavBackward)
+                        }
+                        _ => None,
                     }
+                } else {
+                    None
                 }
-                iced::Event::PlatformSpecific(
-                    iced::event::PlatformSpecific::Wayland(
-                        iced::event::wayland::Event::Layer(
-                            iced::event::wayland::LayerEvent::Unfocused,
-                            _,
-                            _,
-                        ),
+            }
+            iced::Event::PlatformSpecific(
+                iced::event::PlatformSpecific::Wayland(
+                    iced::event::wayland::Event::Layer(
+                        iced::event::wayland::LayerEvent::Unfocused,
+                        _,
+                        _,
                     ),
-                ) => Some(Message::Unfocused),
-                _ => None,
+                ),
+            ) => Some(Message::Unfocused),
+            _ => {
+                if matches!(
+                    status,
+                    iced::event::Status::Captured
+                ) {
+                    return None;
+                }
+                None
             }
         },
     )

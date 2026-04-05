@@ -80,7 +80,7 @@ impl Entry {
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         if let Some(text) = self.text_content() {
-            text.hash(&mut hasher);
+            text.as_bytes().hash(&mut hasher);
         } else if let Some((_mime, data)) = self.image_data()
         {
             data.hash(&mut hasher);

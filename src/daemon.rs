@@ -487,7 +487,7 @@ impl Daemon {
 
 fn resize_to_thumbnail(data: &[u8]) -> Option<Vec<u8>> {
     let img = image::load_from_memory(data).ok()?;
-    let thumb = img.thumbnail(96, 96);
+    let thumb = img.thumbnail(256, 256);
     let mut buf = std::io::Cursor::new(Vec::new());
     thumb
         .write_to(&mut buf, image::ImageFormat::Png)

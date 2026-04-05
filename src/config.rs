@@ -11,6 +11,7 @@ pub struct Config {
     pub show_thumbnails: bool,
     pub show_remote_thumbnails: bool,
     pub max_thumbnail_bytes: usize,
+    pub position: String,
 }
 
 impl Default for Config {
@@ -22,6 +23,7 @@ impl Default for Config {
             show_thumbnails: true,
             show_remote_thumbnails: false,
             max_thumbnail_bytes: 5 * 1024 * 1024,
+            position: "top".to_string(),
         }
     }
 }
@@ -94,6 +96,9 @@ show_remote_thumbnails = false
 
 # Maximum size in bytes for remote thumbnail downloads
 max_thumbnail_bytes = 5242880
+
+# Overlay position: \"top\", \"bottom\", \"left\", \"right\"
+position = \"top\"
 ";
 
 pub fn write_default_config() -> Result<PathBuf, std::io::Error> {
