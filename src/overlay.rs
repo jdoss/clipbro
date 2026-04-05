@@ -45,6 +45,8 @@ static PAUSE_HOTKEY: OnceLock<ParsedHotkey> =
 enum Message {
     SearchChanged(String),
     SelectEntry(i64),
+    SelectByIndex(usize),
+    OpenUrl(String),
     ToggleFavorite(i64),
     ToggleFocusedFavorite,
     DeleteEntry,
@@ -52,6 +54,7 @@ enum Message {
     NavBackward,
     CharTyped(String),
     Backspace,
+    CtrlState(bool),
     TogglePause,
     PauseSent,
     Dismiss,
@@ -147,7 +150,9 @@ struct Overlay {
     handles: HashMap<i64, iced_image::Handle>,
     highlights: HashMap<i64, HighlightedText>,
     horizontal: bool,
-    #[allow(dead_code)] // used during init for highlights
+    ctrl_held: bool,
+    open_links_in_browser: bool,
+    #[allow(dead_code)]
     is_dark: bool,
     db: Database,
 }
@@ -211,6 +216,9 @@ impl Overlay {
             ParsedHotkey::parse(&config.hotkeys.pause),
         );
 
+        let open_links =
+            config.open_links_in_browser;
+
         let overlay = Self {
             entries,
             search_query: String::new(),
@@ -219,6 +227,8 @@ impl Overlay {
             handles,
             highlights,
             horizontal,
+            ctrl_held: false,
+            open_links_in_browser: open_links,
             is_dark,
             db,
         };
@@ -264,7 +274,34 @@ impl Overlay {
                 self.search_query.pop();
                 self.focused_index = 0;
             }
+            Message::CtrlState(held) => {
+                self.ctrl_held = held;
+            }
             Message::SelectEntry(id) => {
+                if self.ctrl_held
+                    && self.open_links_in_browser
+                {
+                    if let Some(entry) = self
+                        .entries
+                        .iter()
+                        .find(|e| e.id == id)
+                    {
+                        if entry.entry_type
+                            == crate::entry::EntryType::Url
+                        {
+                            if let Some(url) =
+                                entry.text_content()
+                            {
+                                return Task::done(
+                                    Message::OpenUrl(
+                                        url.trim()
+                                            .to_string(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
                 return Task::perform(
                     async move {
                         let action =
@@ -272,7 +309,8 @@ impl Overlay {
                                 id,
                             };
                         if let Err(e) =
-                            dbus::send_action(action).await
+                            dbus::send_action(action)
+                                .await
                         {
                             tracing::error!(
                                 "Failed to send \
@@ -282,6 +320,27 @@ impl Overlay {
                     },
                     |_| Message::SelectionSent,
                 );
+            }
+            Message::SelectByIndex(idx) => {
+                let filtered = self.filtered_entries();
+                if let Some(entry) = filtered.get(idx)
+                {
+                    let id = entry.id;
+                    return Task::done(
+                        Message::SelectEntry(id),
+                    );
+                }
+            }
+            Message::OpenUrl(url) => {
+                let _ = std::process::Command::new(
+                    "xdg-open",
+                )
+                .arg(&url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+                return iced::exit();
             }
             Message::SelectionSent
             | Message::PauseSent => {
@@ -363,7 +422,34 @@ impl Overlay {
                     }
                 }
             }
-            Message::Dismiss | Message::Unfocused => {
+            Message::Dismiss => {
+                if self.ctrl_held
+                    && self.open_links_in_browser
+                {
+                    let filtered =
+                        self.filtered_entries();
+                    if let Some(entry) = filtered
+                        .get(self.focused_index)
+                    {
+                        if entry.entry_type
+                            == crate::entry::EntryType::Url
+                        {
+                            if let Some(url) =
+                                entry.text_content()
+                            {
+                                return Task::done(
+                                    Message::OpenUrl(
+                                        url.trim()
+                                            .to_string(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                return self.select_focused_and_exit();
+            }
+            Message::Unfocused => {
                 return self.select_focused_and_exit();
             }
             Message::NavForward => {
@@ -453,6 +539,11 @@ impl Overlay {
                         .iter()
                         .enumerate()
                         .map(|(i, entry)| {
+                            let idx = if i < 9 {
+                                Some(i + 1)
+                            } else {
+                                None
+                            };
                             entry_card(
                                 entry,
                                 i == self.focused_index,
@@ -463,6 +554,7 @@ impl Overlay {
                                 self.highlights
                                     .get(&entry.id),
                                 self.horizontal,
+                                idx,
                             )
                         })
                         .collect();
@@ -719,6 +811,7 @@ fn entry_card<'a>(
     handle: Option<&iced_image::Handle>,
     highlight: Option<&'a HighlightedText>,
     horizontal: bool,
+    index: Option<usize>,
 ) -> Element<'a, Message> {
     use crate::entry::{EntryType, is_image_url};
 
@@ -867,11 +960,59 @@ fn entry_card<'a>(
         )
         .align_y(alignment::Vertical::Center);
 
+    let body_with_index: Element<'a, Message> =
+        if let Some(idx) = index {
+            let badge = container(
+                text(format!("{idx}"))
+                    .size(11)
+                    .color(Color::from_rgba8(
+                        180, 180, 180, 0.9,
+                    )),
+            )
+            .padding([1, 5])
+            .style(|_theme: &iced::Theme| {
+                container::Style {
+                    background: Some(
+                        Color::from_rgba8(
+                            60, 60, 60, 0.7,
+                        )
+                        .into(),
+                    ),
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            });
+            let overlay_row = Row::new()
+                .push(
+                    container(
+                        iced::widget::Space::new(),
+                    )
+                    .width(Length::Fill),
+                )
+                .push(badge);
+            Column::new()
+                .push(overlay_row)
+                .push(body)
+                .spacing(2)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            Column::new()
+                .push(body)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        };
+
     let card_content = Column::new()
         .spacing(2)
         .width(Length::Fill)
         .height(Length::Fill)
-        .push(body)
+        .push(body_with_index)
         .push(footer);
 
     let (card_w, card_h) = if horizontal {
@@ -1057,9 +1198,25 @@ fn input_subscription() -> Subscription<Message> {
                         }
                     }
                     iced::keyboard::Key::Character(c) => {
-                        if modifiers.control()
-                            || modifiers.alt()
-                        {
+                        if modifiers.control() {
+                            if let Some(digit) =
+                                c.chars().next()
+                            {
+                                if ('1'..='9')
+                                    .contains(&digit)
+                                {
+                                    let idx =
+                                        (digit as usize)
+                                            - ('1'
+                                                as usize);
+                                    return Some(
+                                        Message::SelectByIndex(idx),
+                                    );
+                                }
+                            }
+                            return None;
+                        }
+                        if modifiers.alt() {
                             return None;
                         }
                         Some(Message::CharTyped(
@@ -1068,6 +1225,15 @@ fn input_subscription() -> Subscription<Message> {
                     }
                     _ => None,
                 }
+            }
+            iced::Event::Keyboard(
+                iced::keyboard::Event::ModifiersChanged(
+                    modifiers,
+                ),
+            ) => {
+                Some(Message::CtrlState(
+                    modifiers.control(),
+                ))
             }
             iced::Event::PlatformSpecific(
                 iced::event::PlatformSpecific::Wayland(

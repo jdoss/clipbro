@@ -13,6 +13,7 @@ pub struct Config {
     pub max_thumbnail_bytes: usize,
     pub position: String,
     pub db_path: Option<String>,
+    pub open_links_in_browser: bool,
     pub hotkeys: Hotkeys,
 }
 
@@ -35,6 +36,7 @@ impl Default for Config {
             max_thumbnail_bytes: 5 * 1024 * 1024,
             position: "top".to_string(),
             db_path: None,
+            open_links_in_browser: true,
             hotkeys: Hotkeys::default(),
         }
     }
@@ -127,6 +129,9 @@ max_thumbnail_bytes = 5242880
 # Overlay position: \"top\", \"bottom\", \"left\", \"right\"
 position = \"top\"
 
+# Open URL entries in default browser with Ctrl+Enter or Ctrl+Click
+open_links_in_browser = true
+
 # Custom database path (default: ~/.config/clipbro/clipbro.db)
 # db_path = \"/path/to/clipbro.db\"
 
@@ -171,6 +176,7 @@ mod tests {
         );
         assert_eq!(c.hotkeys.delete_entry, "delete");
         assert_eq!(c.hotkeys.pause, "ctrl+p");
+        assert!(c.open_links_in_browser);
     }
 
     #[test]
