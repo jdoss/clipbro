@@ -165,6 +165,7 @@ impl Database {
         Ok(None)
     }
 
+    #[allow(dead_code)] // used by get_entry, future CLI commands
     pub fn list_entries(&self, limit: usize) -> Result<Vec<Entry>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, created_at, entry_type, favorite
@@ -199,15 +200,89 @@ impl Database {
         Ok(entries)
     }
 
-    fn load_contents(&self, entry_id: i64) -> Result<MimeDataMap, DbError> {
+    pub fn list_entries_light(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<Entry>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT mime, content FROM contents WHERE entry_id = ?",
+            "SELECT id, created_at, entry_type, favorite
+             FROM entries
+             ORDER BY favorite DESC, created_at DESC
+             LIMIT ?",
         )?;
 
+        let entry_rows: Vec<(i64, i64, String, bool)> =
+            stmt.query_map(
+                params![limit as i64],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3)? != 0,
+                    ))
+                },
+            )?
+            .collect::<Result<_, _>>()?;
+
+        let mut entries =
+            Vec::with_capacity(entry_rows.len());
+        for (id, created_at, type_str, favorite) in
+            entry_rows
+        {
+            let contents =
+                self.load_contents_light(id)?;
+            entries.push(Entry {
+                id,
+                created_at,
+                entry_type: EntryType::from_str(&type_str),
+                favorite,
+                contents,
+            });
+        }
+
+        Ok(entries)
+    }
+
+    fn load_contents(
+        &self,
+        entry_id: i64,
+    ) -> Result<MimeDataMap, DbError> {
+        self.load_contents_filtered(entry_id, false)
+    }
+
+    fn load_contents_light(
+        &self,
+        entry_id: i64,
+    ) -> Result<MimeDataMap, DbError> {
+        self.load_contents_filtered(entry_id, true)
+    }
+
+    fn load_contents_filtered(
+        &self,
+        entry_id: i64,
+        skip_images: bool,
+    ) -> Result<MimeDataMap, DbError> {
+        let sql = if skip_images {
+            "SELECT mime, content FROM contents \
+             WHERE entry_id = ? \
+             AND mime NOT LIKE 'image/%'"
+        } else {
+            "SELECT mime, content FROM contents \
+             WHERE entry_id = ?"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
         let mut map = MimeDataMap::new();
-        let rows = stmt.query_map(params![entry_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![entry_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                ))
+            },
+        )?;
 
         for row in rows {
             let (mime, content) = row?;

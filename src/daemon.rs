@@ -173,8 +173,13 @@ impl Daemon {
                             }
                         }
 
-                        if self.config.show_remote_thumbnails
-                            && !is_image
+                        if is_image {
+                            self.generate_thumbnail(
+                                id, &content,
+                            );
+                        } else if self
+                            .config
+                            .show_remote_thumbnails
                         {
                             self.maybe_fetch_thumbnail(
                                 id, &content,
@@ -295,6 +300,44 @@ impl Daemon {
         dbus::set_visible(false);
     }
 
+    fn generate_thumbnail(
+        &self,
+        entry_id: i64,
+        image_data: &[u8],
+    ) {
+        let data = image_data.to_vec();
+        let db = self.db.clone();
+
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(
+                move || resize_to_thumbnail(&data),
+            )
+            .await;
+
+            let Some(png_bytes) = result.ok().flatten()
+            else {
+                return;
+            };
+
+            let db = db.lock().await;
+            if let Err(e) = db.add_content(
+                entry_id,
+                entry::THUMBNAIL_MIME,
+                &png_bytes,
+            ) {
+                tracing::error!(
+                    "Failed to store image thumbnail: {e}"
+                );
+            } else {
+                tracing::debug!(
+                    "Generated thumbnail for entry \
+                     {entry_id} ({} bytes)",
+                    png_bytes.len()
+                );
+            }
+        });
+    }
+
     fn maybe_fetch_thumbnail(
         &self,
         entry_id: i64,
@@ -318,24 +361,26 @@ impl Daemon {
             )
             .await;
 
-            let Some(bytes) = result.ok().flatten() else {
+            let Some(raw) = result.ok().flatten() else {
                 return;
             };
+            let thumb = resize_to_thumbnail(&raw)
+                .unwrap_or(raw);
 
             let db = db.lock().await;
             if let Err(e) = db.add_content(
                 entry_id,
                 entry::THUMBNAIL_MIME,
-                &bytes,
+                &thumb,
             ) {
                 tracing::error!(
                     "Failed to store thumbnail: {e}"
                 );
             } else {
                 tracing::info!(
-                    "Cached thumbnail for entry {entry_id} \
-                     ({} bytes)",
-                    bytes.len()
+                    "Cached thumbnail for entry \
+                     {entry_id} ({} bytes)",
+                    thumb.len()
                 );
             }
         });
@@ -438,6 +483,16 @@ impl Daemon {
         }
         tracing::info!("Watchers stopped");
     }
+}
+
+fn resize_to_thumbnail(data: &[u8]) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(data).ok()?;
+    let thumb = img.thumbnail(96, 96);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    thumb
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .ok()?;
+    Some(buf.into_inner())
 }
 
 fn fetch_thumbnail(

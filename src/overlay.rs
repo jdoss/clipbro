@@ -55,7 +55,7 @@ impl Overlay {
             }
         };
         let entries = db
-            .list_entries(config.max_entries)
+            .list_entries_light(config.max_entries)
             .unwrap_or_default();
 
         let active_entry_id =
@@ -262,22 +262,19 @@ fn build_handles(
 ) -> HashMap<i64, iced_image::Handle> {
     let mut map = HashMap::new();
     for entry in entries {
-        let bytes = match &entry.entry_type {
-            crate::entry::EntryType::Image
-                if show_thumbnails =>
-            {
-                entry
-                    .image_data()
-                    .map(|(_mime, data)| data)
+        let dominated_by_config = match &entry.entry_type {
+            crate::entry::EntryType::Image => {
+                show_thumbnails
             }
-            crate::entry::EntryType::Url
-                if show_remote_thumbnails =>
-            {
-                entry.thumbnail_data()
+            crate::entry::EntryType::Url => {
+                show_remote_thumbnails
             }
-            _ => None,
+            _ => false,
         };
-        if let Some(data) = bytes {
+        if !dominated_by_config {
+            continue;
+        }
+        if let Some(data) = entry.thumbnail_data() {
             let handle =
                 iced_image::Handle::from_bytes(
                     data.to_vec(),
