@@ -129,7 +129,7 @@ impl Daemon {
                 };
                 match entry {
                     Ok(Some(entry)) => {
-                        clipboard::copy_to_clipboard(&entry);
+                        clipboard::copy_to_clipboard(&entry).await;
                         tracing::info!("Copied entry {id}");
                     }
                     Ok(None) => {
