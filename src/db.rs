@@ -344,7 +344,6 @@ impl Database {
         Ok(())
     }
 
-    #[allow(dead_code)] // UI favorite toggle not yet wired
     pub fn toggle_favorite(&self, id: i64) -> Result<(), DbError> {
         self.conn.execute(
             "UPDATE entries SET favorite = NOT favorite WHERE id = ?",

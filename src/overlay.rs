@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::window;
@@ -33,10 +34,18 @@ const SIDEBAR_WIDTH: u32 = 320;
 const SCROLLABLE_ID: &str = "clipbro-cards";
 const SEARCH_ID: &str = "clipbro-search";
 
+static FAVORITE_HOTKEY: OnceLock<ParsedHotkey> =
+    OnceLock::new();
+static DELETE_HOTKEY: OnceLock<ParsedHotkey> =
+    OnceLock::new();
+
 #[derive(Debug, Clone)]
 enum Message {
     SearchChanged(String),
     SelectEntry(i64),
+    ToggleFavorite(i64),
+    ToggleFocusedFavorite,
+    DeleteEntry,
     NavForward,
     NavBackward,
     CharTyped(String),
@@ -44,6 +53,81 @@ enum Message {
     Dismiss,
     Unfocused,
     SelectionSent,
+}
+
+#[derive(Clone)]
+struct ParsedHotkey {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    key_char: String,
+}
+
+impl ParsedHotkey {
+    fn parse(s: &str) -> Self {
+        let lower = s.to_lowercase();
+        let parts: Vec<&str> =
+            lower.split('+').map(|p| p.trim()).collect();
+        let mut hotkey = Self {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            key_char: String::new(),
+        };
+        for (i, part) in parts.iter().enumerate() {
+            if i == parts.len() - 1 {
+                hotkey.key_char = part.to_string();
+            } else {
+                match *part {
+                    "ctrl" => hotkey.ctrl = true,
+                    "alt" => hotkey.alt = true,
+                    "shift" => hotkey.shift = true,
+                    _ => {}
+                }
+            }
+        }
+        hotkey
+    }
+
+    fn matches(
+        &self,
+        key: &iced::keyboard::Key,
+        mods: iced::keyboard::Modifiers,
+    ) -> bool {
+        if mods.control() != self.ctrl
+            || mods.alt() != self.alt
+            || mods.shift() != self.shift
+        {
+            return false;
+        }
+        match key {
+            iced::keyboard::Key::Character(c) => {
+                c.to_lowercase() == self.key_char
+            }
+            iced::keyboard::Key::Named(named) => {
+                self.matches_named(named)
+            }
+            _ => false,
+        }
+    }
+
+    fn matches_named(
+        &self,
+        named: &iced::keyboard::key::Named,
+    ) -> bool {
+        use iced::keyboard::key::Named;
+        let expected = match self.key_char.as_str() {
+            "delete" => Named::Delete,
+            "insert" => Named::Insert,
+            "home" => Named::Home,
+            "end" => Named::End,
+            "pageup" => Named::PageUp,
+            "pagedown" => Named::PageDown,
+            "tab" => Named::Tab,
+            _ => return false,
+        };
+        *named == expected
+    }
 }
 
 struct HighlightedText {
@@ -61,6 +145,7 @@ struct Overlay {
     horizontal: bool,
     #[allow(dead_code)] // used during init for highlights
     is_dark: bool,
+    db: Database,
 }
 
 impl Overlay {
@@ -106,6 +191,17 @@ impl Overlay {
         let highlights =
             build_highlights(&entries, is_dark);
 
+        let _ = FAVORITE_HOTKEY.set(
+            ParsedHotkey::parse(
+                &config.hotkeys.toggle_favorite,
+            ),
+        );
+        let _ = DELETE_HOTKEY.set(
+            ParsedHotkey::parse(
+                &config.hotkeys.delete_entry,
+            ),
+        );
+
         let overlay = Self {
             entries,
             search_query: String::new(),
@@ -115,6 +211,7 @@ impl Overlay {
             highlights,
             horizontal,
             is_dark,
+            db,
         };
 
         let id = window::Id::unique();
@@ -179,6 +276,64 @@ impl Overlay {
             }
             Message::SelectionSent => {
                 return iced::exit();
+            }
+            Message::ToggleFocusedFavorite => {
+                if let Some(entry) = self
+                    .filtered_entries()
+                    .get(self.focused_index)
+                {
+                    let id = entry.id;
+                    return Task::done(
+                        Message::ToggleFavorite(id),
+                    );
+                }
+            }
+            Message::ToggleFavorite(id) => {
+                if let Err(e) =
+                    self.db.toggle_favorite(id)
+                {
+                    tracing::error!(
+                        "Failed to toggle \
+                         favorite: {e}"
+                    );
+                } else if let Some(entry) = self
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.id == id)
+                {
+                    entry.favorite = !entry.favorite;
+                }
+            }
+            Message::DeleteEntry => {
+                let filtered = self.filtered_entries();
+                let entry =
+                    filtered.get(self.focused_index);
+                if let Some(entry) = entry {
+                    if !entry.favorite {
+                        let id = entry.id;
+                        if let Err(e) =
+                            self.db.delete(id)
+                        {
+                            tracing::error!(
+                                "Failed to delete \
+                                 entry: {e}"
+                            );
+                        } else {
+                            self.entries
+                                .retain(|e| e.id != id);
+                            let count =
+                                self.filtered_entries()
+                                    .len();
+                            if count > 0
+                                && self.focused_index
+                                    >= count
+                            {
+                                self.focused_index =
+                                    count - 1;
+                            }
+                        }
+                    }
+                }
             }
             Message::Dismiss | Message::Unfocused => {
                 return self.select_focused_and_exit();
@@ -501,143 +656,157 @@ fn entry_card<'a>(
 ) -> Element<'a, Message> {
     use crate::entry::{EntryType, is_image_url};
 
-    let badge = match (active, entry.favorite) {
-        (true, true) => "\u{1f4cb} \u{2b50}",
-        (true, false) => "\u{1f4cb}",
-        (false, true) => "\u{2b50}",
-        (false, false) => "",
+    let (star, star_color) = if entry.favorite {
+        (
+            "\u{2605}",
+            Color::from_rgba8(218, 165, 32, 1.0),
+        )
+    } else {
+        (
+            "\u{2606}",
+            Color::from_rgba8(160, 160, 160, 0.8),
+        )
+    };
+    let entry_id = entry.id;
+    let star_btn: Element<'a, Message> = button(
+        text(star).size(18).color(star_color),
+    )
+    .on_press(Message::ToggleFavorite(entry_id))
+    .padding([0, 2])
+    .style(|_theme: &iced::Theme, _status| {
+        button::Style {
+            background: None,
+            ..Default::default()
+        }
+    })
+    .into();
+
+    let active_badge = if active {
+        "\u{1f4cb} "
+    } else {
+        ""
     };
 
-    let has_badge = !badge.is_empty();
-
-    let body: Element<'a, Message> = match &entry.entry_type
-    {
-        EntryType::Image => {
-            if let Some(h) = handle {
-                column![
+    let (body, type_label): (Element<'a, Message>, &str) =
+        match &entry.entry_type {
+            EntryType::Image => {
+                let el = if let Some(h) = handle {
                     iced_image::Image::new(h.clone())
                         .content_fit(ContentFit::Contain)
                         .width(Length::Fill)
-                        .height(Length::FillPortion(4)),
-                    text("Image")
-                        .size(12)
-                        .width(Length::Fill)
-                        .wrapping(Wrapping::None),
-                ]
-                .spacing(4)
-                .align_x(alignment::Horizontal::Center)
-                .into()
-            } else {
-                container(text("[Image]"))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                    .into()
+                        .height(Length::Fill)
+                        .into()
+                } else {
+                    container(text("[Image]"))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill)
+                        .into()
+                };
+                (el, "Image")
             }
-        }
-        EntryType::Url => {
-            let url =
-                entry.text_content().unwrap_or("[url]");
-            let emoji = if is_image_url(url) {
-                "\u{1f5bc}\u{fe0f} "
-            } else {
-                "\u{1f517} "
-            };
-            if let Some(h) = handle {
-                column![
-                    iced_image::Image::new(h.clone())
+            EntryType::Url => {
+                let url = entry
+                    .text_content()
+                    .unwrap_or("[url]");
+                let emoji = if is_image_url(url) {
+                    "\u{1f5bc}\u{fe0f} "
+                } else {
+                    "\u{1f517} "
+                };
+                if let Some(h) = handle {
+                    let el = column![
+                        iced_image::Image::new(
+                            h.clone(),
+                        )
                         .content_fit(ContentFit::Contain)
                         .width(Length::Fill)
                         .height(Length::FillPortion(3)),
-                    text(format!("{emoji}{url}"))
-                        .size(11)
-                        .wrapping(Wrapping::WordOrGlyph)
-                        .width(Length::Fill),
-                    text("Image URL")
-                        .size(11)
-                        .width(Length::Fill),
-                ]
-                .spacing(2)
-                .into()
-            } else {
-                column![
-                    text(format!("{emoji}{url}"))
-                        .size(13)
-                        .wrapping(Wrapping::WordOrGlyph)
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                    text("URL")
-                        .size(11)
-                        .width(Length::Fill),
-                ]
-                .spacing(4)
-                .into()
+                        text(format!("{emoji}{url}"))
+                            .size(11)
+                            .wrapping(
+                                Wrapping::WordOrGlyph,
+                            )
+                            .width(Length::Fill),
+                    ]
+                    .spacing(2)
+                    .into();
+                    (el, "Image URL")
+                } else {
+                    let el = text(format!(
+                        "{emoji}{url}"
+                    ))
+                    .size(13)
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into();
+                    (el, "URL")
+                }
             }
-        }
-        EntryType::Text => {
-            if let Some(hl) = highlight {
-                let is_code =
-                    hl.language != "Plain Text";
-                let font_size =
-                    if is_code { 12 } else { 14 };
-                let spans: Vec<
-                    iced::widget::text::Span<
-                        '_,
-                        (),
-                        iced::Font,
-                    >,
-                > = hl
-                    .spans
-                    .iter()
-                    .map(|(color, s)| {
-                        iced::widget::text::Span::new(
-                            s.as_str(),
-                        )
-                        .color(*color)
-                        .size(font_size)
-                    })
-                    .collect();
-                column![
-                    rich_text(spans)
+            EntryType::Text => {
+                if let Some(hl) = highlight {
+                    let is_code =
+                        hl.language != "Plain Text";
+                    let font_size =
+                        if is_code { 12 } else { 14 };
+                    let spans: Vec<
+                        iced::widget::text::Span<
+                            '_,
+                            (),
+                            iced::Font,
+                        >,
+                    > = hl
+                        .spans
+                        .iter()
+                        .map(|(color, s)| {
+                            iced::widget::text::Span::new(
+                                s.as_str(),
+                            )
+                            .color(*color)
+                            .size(font_size)
+                        })
+                        .collect();
+                    let el = rich_text(spans)
                         .wrapping(Wrapping::Word)
                         .width(Length::Fill)
-                        .height(Length::Fill),
-                    text(&hl.language)
-                        .size(11)
-                        .width(Length::Fill),
-                ]
-                .spacing(4)
-                .into()
-            } else {
-                let content = entry
-                    .text_content()
-                    .unwrap_or("[empty]");
-                let truncated: String =
-                    content.chars().take(500).collect();
-                column![
-                    text(truncated)
+                        .height(Length::Fill)
+                        .into();
+                    (el, &hl.language)
+                } else {
+                    let content = entry
+                        .text_content()
+                        .unwrap_or("[empty]");
+                    let truncated: String =
+                        content.chars().take(500).collect();
+                    let el = text(truncated)
                         .size(14)
                         .wrapping(Wrapping::Word)
                         .width(Length::Fill)
-                        .height(Length::Fill),
-                    text("Text")
-                        .size(11)
-                        .width(Length::Fill),
-                ]
-                .spacing(4)
-                .into()
+                        .height(Length::Fill)
+                        .into();
+                    (el, "Text")
+                }
             }
-        }
-    };
+        };
 
-    let mut card_content = Column::new()
+    let footer = Row::new()
+        .push(
+            text(format!("{active_badge}{type_label}"))
+                .size(11),
+        )
+        .push(
+            container(star_btn)
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Right),
+        )
+        .align_y(alignment::Vertical::Center);
+
+    let card_content = Column::new()
         .spacing(2)
         .width(Length::Fill)
-        .height(Length::Fill);
-    if has_badge {
-        card_content =
-            card_content.push(text(badge).size(12));
-    }
-    card_content = card_content.push(body);
+        .height(Length::Fill)
+        .push(body)
+        .push(footer);
 
     let (card_w, card_h) = if horizontal {
         (
@@ -651,6 +820,7 @@ fn entry_card<'a>(
         )
     };
 
+    let is_favorite = entry.favorite;
     let btn_style =
         move |theme: &iced::Theme,
               _status: button::Status|
@@ -662,16 +832,40 @@ fn entry_card<'a>(
                 b: 0.2,
                 a: 1.0,
             };
+            let favorite_gold = iced::Color {
+                r: 0.85,
+                g: 0.65,
+                b: 0.13,
+                a: 1.0,
+            };
             let (bg, border) = if focused {
+                let border_color = if is_favorite {
+                    favorite_gold
+                } else {
+                    focus_green
+                };
                 (
                     iced::Color {
                         a: 0.20,
-                        ..focus_green
+                        ..border_color
                     }
                     .into(),
                     iced::Border {
-                        color: focus_green,
+                        color: border_color,
                         width: 3.0,
+                        radius: 8.0.into(),
+                    },
+                )
+            } else if is_favorite {
+                (
+                    iced::Color {
+                        a: 0.10,
+                        ..favorite_gold
+                    }
+                    .into(),
+                    iced::Border {
+                        color: favorite_gold,
+                        width: 2.0,
                         radius: 8.0.into(),
                     },
                 )
@@ -750,9 +944,23 @@ fn input_subscription() -> Subscription<Message> {
         |event, status, _| match &event {
             iced::Event::Keyboard(
                 iced::keyboard::Event::KeyPressed {
-                    key, ..
+                    key, modifiers, ..
                 },
             ) => {
+                if let Some(hk) = FAVORITE_HOTKEY.get() {
+                    if hk.matches(key, *modifiers) {
+                        return Some(
+                            Message::ToggleFocusedFavorite,
+                        );
+                    }
+                }
+                if let Some(hk) = DELETE_HOTKEY.get() {
+                    if hk.matches(key, *modifiers) {
+                        return Some(
+                            Message::DeleteEntry,
+                        );
+                    }
+                }
                 match key {
                     iced::keyboard::Key::Named(named) => {
                         use iced::keyboard::key::Named;
@@ -776,6 +984,11 @@ fn input_subscription() -> Subscription<Message> {
                         }
                     }
                     iced::keyboard::Key::Character(c) => {
+                        if modifiers.control()
+                            || modifiers.alt()
+                        {
+                            return None;
+                        }
                         Some(Message::CharTyped(
                             c.to_string(),
                         ))

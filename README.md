@@ -5,11 +5,14 @@ A clipboard manager for the COSMIC desktop environment. Clipbro runs as a backgr
 ## Features
 
 - **Card-based overlay** with image previews and syntax-highlighted code
+- **Favorites** pin entries so they survive clears and deletions. Toggle with Ctrl+F or click the star on any card. Favorited cards get a gold border and filled star
 - **Syntax highlighting** for 200+ languages including Rust, Python, Go, JavaScript, TypeScript, TOML, YAML, JSON, Dockerfile, Bash, SQL, CSS, Markdown, and more
 - **Language detection** identifies what you copied and labels each card (e.g., "Python", "TOML", "JSON")
 - **Image thumbnails** for copied images and optionally for image URLs
 - **Multi-term search** across content, language, and type. Type `python quickvm` to find Python entries containing "quickvm". Type `image` to filter to images only
 - **Instant search** starts filtering as you type, no need to click the search box
+- **Delete entries** with the Delete key. Favorites are protected and cannot be deleted
+- **Configurable hotkeys** for favorite toggle and entry deletion
 - **Clipboard and primary selection sync** keeps both buffers in sync
 - **Encrypted database** with SQLCipher, key stored in your system keyring
 - **Configurable overlay position** at the top, bottom, left, or right edge of your screen
@@ -83,7 +86,10 @@ This opens and closes the overlay. When the overlay is open:
 - **Type** to search and filter cards instantly
 - **Backspace** to edit your search
 - **Escape** or **Enter** selects the focused card and copies it to your clipboard
+- **Ctrl+F** toggles favorite on the focused card
+- **Delete** removes the focused card (no-op on favorites)
 - **Click** a card to select it directly
+- **Click the star** on any card to toggle its favorite status
 - Clicking outside the overlay or losing focus also selects the focused card
 
 ## Configuration
@@ -111,6 +117,13 @@ max_thumbnail_bytes = 5242880
 
 # Overlay position: "top", "bottom", "left", "right"
 position = "top"
+
+[hotkeys]
+# Toggle favorite on the focused entry
+toggle_favorite = "ctrl+f"
+
+# Delete the focused entry (favorites are protected)
+delete_entry = "delete"
 ```
 
 ### Overlay Position
@@ -127,6 +140,10 @@ The `position` setting controls where the overlay appears and how cards are arra
 ### Image URL Thumbnails
 
 Set `show_remote_thumbnails = true` to automatically fetch and cache thumbnail previews for image URLs you copy. Thumbnails are stored in the database so they only get downloaded once. The `max_thumbnail_bytes` setting limits how large a remote image can be before it's skipped.
+
+### Hotkeys
+
+The `[hotkeys]` section lets you rebind overlay keyboard shortcuts. Values are modifier+key strings like `"ctrl+f"`, `"alt+d"`, or `"delete"`. Supported modifiers: `ctrl`, `alt`, `shift`. Hotkeys match on the logical key, so remapped keyboard layouts (Colemak, Dvorak, etc.) work correctly.
 
 ### Database Encryption
 

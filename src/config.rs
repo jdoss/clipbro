@@ -12,6 +12,14 @@ pub struct Config {
     pub show_remote_thumbnails: bool,
     pub max_thumbnail_bytes: usize,
     pub position: String,
+    pub hotkeys: Hotkeys,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct Hotkeys {
+    pub toggle_favorite: String,
+    pub delete_entry: String,
 }
 
 impl Default for Config {
@@ -24,6 +32,16 @@ impl Default for Config {
             show_remote_thumbnails: false,
             max_thumbnail_bytes: 5 * 1024 * 1024,
             position: "top".to_string(),
+            hotkeys: Hotkeys::default(),
+        }
+    }
+}
+
+impl Default for Hotkeys {
+    fn default() -> Self {
+        Self {
+            toggle_favorite: "ctrl+f".to_string(),
+            delete_entry: "delete".to_string(),
         }
     }
 }
@@ -99,6 +117,13 @@ max_thumbnail_bytes = 5242880
 
 # Overlay position: \"top\", \"bottom\", \"left\", \"right\"
 position = \"top\"
+
+[hotkeys]
+# Toggle favorite on the focused entry
+toggle_favorite = \"ctrl+f\"
+
+# Delete the focused entry (favorites are protected)
+delete_entry = \"delete\"
 ";
 
 pub fn write_default_config() -> Result<PathBuf, std::io::Error> {
