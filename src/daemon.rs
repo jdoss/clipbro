@@ -24,6 +24,7 @@ struct Daemon<C: ClipboardService> {
     db: Arc<Mutex<Database>>,
     config: Config,
     clipboard: C,
+    paused: bool,
     overlay_child: Option<tokio::process::Child>,
     watcher_children: Vec<tokio::process::Child>,
     last_text_store: Option<(Instant, i64)>,
@@ -46,6 +47,7 @@ impl<C: ClipboardService> Daemon<C> {
             db: Arc::new(Mutex::new(db)),
             config,
             clipboard,
+            paused: false,
             overlay_child: None,
             watcher_children: Vec::new(),
             last_text_store: None,
@@ -89,6 +91,18 @@ impl<C: ClipboardService> Daemon<C> {
                     );
                 }
             }
+            PopupAction::TogglePause => {
+                self.paused = !self.paused;
+                dbus::set_paused(self.paused);
+                tracing::info!(
+                    "Clipboard monitoring {}",
+                    if self.paused {
+                        "paused"
+                    } else {
+                        "resumed"
+                    }
+                );
+            }
             PopupAction::Store {
                 mime,
                 content,
@@ -111,6 +125,13 @@ impl<C: ClipboardService> Daemon<C> {
         content: Vec<u8>,
         source: String,
     ) {
+        if self.paused {
+            tracing::debug!(
+                "Skipping store (paused)"
+            );
+            return;
+        }
+
         if source == "primary" {
             if let Some(h) =
                 self.primary_debounce.take()
@@ -1098,6 +1119,63 @@ mod tests {
                 PopupAction::SelectEntry { id: 999999 },
             )
             .await;
+    }
+
+    #[tokio::test]
+    async fn store_skipped_when_paused() {
+        let mock = MockClipboardService::new();
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(PopupAction::TogglePause)
+            .await;
+        assert!(daemon.paused);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"should be ignored",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        assert!(
+            db.list_entries(10).unwrap().is_empty(),
+            "store should be skipped when paused",
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_pause_resumes() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .returning(|_, _| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(PopupAction::TogglePause)
+            .await;
+        assert!(daemon.paused);
+
+        daemon
+            .handle_action(PopupAction::TogglePause)
+            .await;
+        assert!(!daemon.paused);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"should be stored",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        assert_eq!(
+            db.list_entries(10).unwrap().len(),
+            1,
+        );
     }
 }
 

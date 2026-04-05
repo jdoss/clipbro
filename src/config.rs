@@ -12,6 +12,7 @@ pub struct Config {
     pub show_remote_thumbnails: bool,
     pub max_thumbnail_bytes: usize,
     pub position: String,
+    pub db_path: Option<String>,
     pub hotkeys: Hotkeys,
 }
 
@@ -20,6 +21,7 @@ pub struct Config {
 pub struct Hotkeys {
     pub toggle_favorite: String,
     pub delete_entry: String,
+    pub pause: String,
 }
 
 impl Default for Config {
@@ -32,6 +34,7 @@ impl Default for Config {
             show_remote_thumbnails: false,
             max_thumbnail_bytes: 5 * 1024 * 1024,
             position: "top".to_string(),
+            db_path: None,
             hotkeys: Hotkeys::default(),
         }
     }
@@ -42,6 +45,7 @@ impl Default for Hotkeys {
         Self {
             toggle_favorite: "ctrl+f".to_string(),
             delete_entry: "delete".to_string(),
+            pause: "ctrl+p".to_string(),
         }
     }
 }
@@ -92,8 +96,13 @@ pub fn data_dir() -> PathBuf {
         })
 }
 
-pub fn db_path() -> PathBuf {
-    data_dir().join("clipbro.db")
+pub fn db_path(
+    override_path: Option<&str>,
+) -> PathBuf {
+    match override_path {
+        Some(p) => PathBuf::from(p),
+        None => config_dir().join("clipbro.db"),
+    }
 }
 
 const DEFAULT_CONFIG_TOML: &str = "\
@@ -118,12 +127,18 @@ max_thumbnail_bytes = 5242880
 # Overlay position: \"top\", \"bottom\", \"left\", \"right\"
 position = \"top\"
 
+# Custom database path (default: ~/.config/clipbro/clipbro.db)
+# db_path = \"/path/to/clipbro.db\"
+
 [hotkeys]
 # Toggle favorite on the focused entry
 toggle_favorite = \"ctrl+f\"
 
 # Delete the focused entry (favorites are protected)
 delete_entry = \"delete\"
+
+# Toggle pause on clipboard monitoring
+pause = \"ctrl+p\"
 ";
 
 pub fn write_default_config(
@@ -155,6 +170,7 @@ mod tests {
             "ctrl+f",
         );
         assert_eq!(c.hotkeys.delete_entry, "delete");
+        assert_eq!(c.hotkeys.pause, "ctrl+p");
     }
 
     #[test]

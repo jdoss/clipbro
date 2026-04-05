@@ -45,6 +45,8 @@ enum Command {
     Status,
     /// Clear clipboard history
     Clear,
+    /// Toggle pause on clipboard monitoring
+    Pause,
     /// Store clipboard content (used by wl-paste --watch)
     Store {
         #[arg(long, default_value = "text/plain")]
@@ -121,6 +123,7 @@ fn main() {
                 Command::Show => dbus::PopupAction::Show,
                 Command::Hide => dbus::PopupAction::Hide,
                 Command::Clear => dbus::PopupAction::Clear,
+                Command::Pause => dbus::PopupAction::TogglePause,
                 Command::Init
                 | Command::Install
                 | Command::Start
@@ -128,7 +131,9 @@ fn main() {
                 | Command::Restart
                 | Command::Status
                 | Command::Store { .. }
-                | Command::Overlay => unreachable!(),
+                | Command::Overlay => {
+                    unreachable!()
+                }
 
             };
 
@@ -146,7 +151,9 @@ fn main() {
 
             let config = config::Config::load();
 
-            let db_path = config::db_path();
+            let db_path = config::db_path(
+                config.db_path.as_deref(),
+            );
             let db = match db::Database::open(
                 &db_path,
                 config.encrypt_db,
@@ -198,7 +205,8 @@ fn run_init() {
     }
 
     let cfg = config::Config::load();
-    let db_path = config::db_path();
+    let db_path =
+        config::db_path(cfg.db_path.as_deref());
     if db_path.exists() {
         eprintln!(
             "Database already exists: {}",

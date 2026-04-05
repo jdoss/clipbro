@@ -38,6 +38,8 @@ static FAVORITE_HOTKEY: OnceLock<ParsedHotkey> =
     OnceLock::new();
 static DELETE_HOTKEY: OnceLock<ParsedHotkey> =
     OnceLock::new();
+static PAUSE_HOTKEY: OnceLock<ParsedHotkey> =
+    OnceLock::new();
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -50,6 +52,8 @@ enum Message {
     NavBackward,
     CharTyped(String),
     Backspace,
+    TogglePause,
+    PauseSent,
     Dismiss,
     Unfocused,
     SelectionSent,
@@ -151,7 +155,9 @@ struct Overlay {
 impl Overlay {
     fn new() -> (Self, Task<Message>) {
         let config = Config::load();
-        let db_path = config::db_path();
+        let db_path = config::db_path(
+            config.db_path.as_deref(),
+        );
         let db = match Database::open(
             &db_path,
             config.encrypt_db,
@@ -200,6 +206,9 @@ impl Overlay {
             ParsedHotkey::parse(
                 &config.hotkeys.delete_entry,
             ),
+        );
+        let _ = PAUSE_HOTKEY.set(
+            ParsedHotkey::parse(&config.hotkeys.pause),
         );
 
         let overlay = Self {
@@ -274,8 +283,27 @@ impl Overlay {
                     |_| Message::SelectionSent,
                 );
             }
-            Message::SelectionSent => {
+            Message::SelectionSent
+            | Message::PauseSent => {
                 return iced::exit();
+            }
+            Message::TogglePause => {
+                return Task::perform(
+                    async move {
+                        let action =
+                            dbus::PopupAction::TogglePause;
+                        if let Err(e) =
+                            dbus::send_action(action)
+                                .await
+                        {
+                            tracing::error!(
+                                "Failed to send \
+                                 pause toggle: {e}"
+                            );
+                        }
+                    },
+                    |_| Message::PauseSent,
+                );
             }
             Message::ToggleFocusedFavorite => {
                 if let Some(entry) = self
@@ -476,8 +504,46 @@ impl Overlay {
             .width(Length::Fixed(300.0))
             .center_x(Length::Fill);
 
+        let paused = dbus::query_paused();
+        let header: Element<'_, Message> = if paused {
+            let badge = container(
+                text("PAUSED")
+                    .size(12)
+                    .color(Color::from_rgba8(
+                        255, 170, 0, 1.0,
+                    )),
+            )
+            .padding([4, 8])
+            .style(|_theme: &iced::Theme| {
+                container::Style {
+                    background: Some(
+                        Color::from_rgba8(
+                            255, 170, 0, 0.15,
+                        )
+                        .into(),
+                    ),
+                    border: iced::Border {
+                        color: Color::from_rgba8(
+                            255, 170, 0, 0.6,
+                        ),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                }
+            });
+            Row::new()
+                .push(search_widget)
+                .push(badge)
+                .spacing(8)
+                .align_y(alignment::Vertical::Center)
+                .into()
+        } else {
+            search_widget.into()
+        };
+
         let layout: Element<'_, Message> = column![
-            search_widget,
+            header,
             cards_widget,
         ]
         .spacing(8)
@@ -958,6 +1024,13 @@ fn input_subscription() -> Subscription<Message> {
                     if hk.matches(key, *modifiers) {
                         return Some(
                             Message::DeleteEntry,
+                        );
+                    }
+                }
+                if let Some(hk) = PAUSE_HOTKEY.get() {
+                    if hk.matches(key, *modifiers) {
+                        return Some(
+                            Message::TogglePause,
                         );
                     }
                 }

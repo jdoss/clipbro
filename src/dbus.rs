@@ -7,6 +7,7 @@ pub const BUS_NAME: &str = "io.github.jdoss.clipbro";
 pub const OBJECT_PATH: &str = "/io/github/jdoss/clipbro";
 
 static VISIBLE: OnceLock<AtomicBool> = OnceLock::new();
+static PAUSED: OnceLock<AtomicBool> = OnceLock::new();
 
 pub fn set_visible(visible: bool) {
     if let Some(v) = VISIBLE.get() {
@@ -14,8 +15,50 @@ pub fn set_visible(visible: bool) {
     }
 }
 
+pub fn set_paused(paused: bool) {
+    if let Some(v) = PAUSED.get() {
+        v.store(paused, Ordering::Relaxed);
+    }
+}
+
+pub fn query_paused() -> bool {
+    let conn =
+        match zbus::blocking::Connection::session() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+    let reply = conn.call_method(
+        Some(BUS_NAME),
+        OBJECT_PATH,
+        Some("org.freedesktop.DBus.Properties"),
+        "Get",
+        &(
+            "io.github.jdoss.clipbro",
+            "Paused",
+        ),
+    );
+    match reply {
+        Ok(msg) => {
+            msg.body()
+                .deserialize::<zbus::zvariant::Value>()
+                .ok()
+                .and_then(|v| {
+                    match v {
+                        zbus::zvariant::Value::Bool(b) => {
+                            Some(b)
+                        }
+                        _ => None,
+                    }
+                })
+                .unwrap_or(false)
+        }
+        Err(_) => false,
+    }
+}
+
 pub fn init_visible() {
     let _ = VISIBLE.set(AtomicBool::new(false));
+    let _ = PAUSED.set(AtomicBool::new(false));
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +69,7 @@ pub enum PopupAction {
     Clear,
     Store { mime: String, content: Vec<u8>, source: String },
     SelectEntry { id: i64 },
+    TogglePause,
 }
 
 struct ClipbroDBus {
@@ -63,6 +107,18 @@ impl ClipbroDBus {
 
     async fn select_entry(&self, id: i64) {
         let _ = self.tx.send(PopupAction::SelectEntry { id });
+    }
+
+    async fn toggle_pause(&self) {
+        let _ = self.tx.send(PopupAction::TogglePause);
+    }
+
+    #[zbus(property)]
+    fn paused(&self) -> bool {
+        PAUSED
+            .get()
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 
     #[zbus(property)]
@@ -119,8 +175,13 @@ pub async fn send_action(action: PopupAction) -> Result<(), zbus::Error> {
                 PopupAction::Show => "Show",
                 PopupAction::Hide => "Hide",
                 PopupAction::Clear => "Clear",
+                PopupAction::TogglePause => {
+                    "TogglePause"
+                }
                 PopupAction::Store { .. }
-                | PopupAction::SelectEntry { .. } => unreachable!(),
+                | PopupAction::SelectEntry { .. } => {
+                    unreachable!()
+                }
             };
             conn.call_method(
                 Some(BUS_NAME),
