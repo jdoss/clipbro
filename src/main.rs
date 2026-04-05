@@ -30,6 +30,8 @@ enum Command {
     Show,
     /// Hide the clipboard overlay
     Hide,
+    /// Initialize config and database
+    Init,
     /// Clear clipboard history
     Clear,
     /// Store clipboard content (used by wl-paste --watch)
@@ -75,6 +77,9 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Command::Init) => {
+            run_init();
+        }
         Some(Command::Store { mime, source }) => {
             run_store(mime, source);
         }
@@ -90,7 +95,8 @@ fn main() {
                 Command::Show => dbus::PopupAction::Show,
                 Command::Hide => dbus::PopupAction::Hide,
                 Command::Clear => dbus::PopupAction::Clear,
-                Command::Store { .. }
+                Command::Init
+                | Command::Store { .. }
                 | Command::Overlay => unreachable!(),
 
             };
@@ -135,6 +141,50 @@ fn main() {
 
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(daemon::run(db, config));
+        }
+    }
+}
+
+fn run_init() {
+    let config_path = config::config_path();
+    if config_path.exists() {
+        eprintln!(
+            "Config already exists: {}",
+            config_path.display()
+        );
+    } else {
+        match config::write_default_config() {
+            Ok(path) => {
+                eprintln!("Wrote config: {}", path.display());
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to write config: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let cfg = config::Config::load();
+    let db_path = config::db_path();
+    if db_path.exists() {
+        eprintln!(
+            "Database already exists: {}",
+            db_path.display()
+        );
+    } else {
+        match db::Database::open(&db_path, cfg.encrypt_db) {
+            Ok(_) => {
+                eprintln!(
+                    "Created database: {}",
+                    db_path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("Failed to create database: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }

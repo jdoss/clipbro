@@ -75,3 +75,32 @@ pub fn data_dir() -> PathBuf {
 pub fn db_path() -> PathBuf {
     data_dir().join("clipbro.db")
 }
+
+const DEFAULT_CONFIG_TOML: &str = "\
+# Maximum number of clipboard entries to keep
+max_entries = 100
+
+# Sync clipboard and primary selection
+sync_selections = true
+
+# Encrypt the database using the system keyring
+encrypt_db = true
+
+# Show image thumbnails in the overlay
+show_thumbnails = true
+
+# Fetch and cache thumbnails for image URLs
+show_remote_thumbnails = false
+
+# Maximum size in bytes for remote thumbnail downloads
+max_thumbnail_bytes = 5242880
+";
+
+pub fn write_default_config() -> Result<PathBuf, std::io::Error> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, DEFAULT_CONFIG_TOML)?;
+    Ok(path)
+}
