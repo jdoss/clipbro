@@ -50,6 +50,7 @@ enum Message {
     ToggleFavorite(i64),
     ToggleFocusedFavorite,
     DeleteEntry,
+    DeleteEntryById(i64),
     NavForward,
     NavBackward,
     CharTyped(String),
@@ -473,32 +474,31 @@ impl Overlay {
             }
             Message::DeleteEntry => {
                 let filtered = self.filtered_entries();
-                let entry =
-                    filtered.get(self.focused_index);
-                if let Some(entry) = entry {
+                if let Some(entry) =
+                    filtered.get(self.focused_index)
+                {
                     if !entry.favorite {
                         let id = entry.id;
-                        if let Err(e) =
-                            self.db.delete(id)
-                        {
-                            tracing::error!(
-                                "Failed to delete \
-                                 entry: {e}"
-                            );
-                        } else {
-                            self.entries
-                                .retain(|e| e.id != id);
-                            let count =
-                                self.filtered_entries()
-                                    .len();
-                            if count > 0
-                                && self.focused_index
-                                    >= count
-                            {
-                                self.focused_index =
-                                    count - 1;
-                            }
-                        }
+                        return Task::done(
+                            Message::DeleteEntryById(id),
+                        );
+                    }
+                }
+            }
+            Message::DeleteEntryById(id) => {
+                if let Err(e) = self.db.delete(id) {
+                    tracing::error!(
+                        "Failed to delete entry: {e}"
+                    );
+                } else {
+                    self.entries
+                        .retain(|e| e.id != id);
+                    let count =
+                        self.filtered_entries().len();
+                    if count > 0
+                        && self.focused_index >= count
+                    {
+                        self.focused_index = count - 1;
                     }
                 }
             }
@@ -1134,13 +1134,49 @@ fn entry_card<'a>(
             }
         };
 
+    let delete_btn: Option<Element<'a, Message>> =
+        if !entry.favorite {
+            Some(
+                button(
+                    text("\u{2715}")
+                        .size(18)
+                        .color(Color::from_rgba8(
+                            220, 100, 100, 1.0,
+                        )),
+                )
+                .on_press(Message::DeleteEntryById(
+                    entry_id,
+                ))
+                .padding([0, 2])
+                .style(
+                    |_theme: &iced::Theme, _status| {
+                        button::Style {
+                            background: None,
+                            ..Default::default()
+                        }
+                    },
+                )
+                .into(),
+            )
+        } else {
+            None
+        };
+
+    let mut action_btns = Row::new()
+        .spacing(4)
+        .align_y(alignment::Vertical::Center);
+    action_btns = action_btns.push(star_btn);
+    if let Some(del) = delete_btn {
+        action_btns = action_btns.push(del);
+    }
+
     let footer = Row::new()
         .push(
             text(format!("{active_badge}{type_label}"))
                 .size(11),
         )
         .push(
-            container(star_btn)
+            container(action_btns)
                 .width(Length::Fill)
                 .align_x(alignment::Horizontal::Right),
         )
