@@ -489,15 +489,21 @@ fn entry_card<'a>(
               _status: button::Status|
               -> button::Style {
             let palette = theme.palette();
+            let focus_green = iced::Color {
+                r: 0.0,
+                g: 0.5,
+                b: 0.2,
+                a: 1.0,
+            };
             let (bg, border) = if focused {
                 (
                     iced::Color {
                         a: 0.20,
-                        ..palette.primary
+                        ..focus_green
                     }
                     .into(),
                     iced::Border {
-                        color: palette.primary,
+                        color: focus_green,
                         width: 3.0,
                         radius: 8.0.into(),
                     },
@@ -624,6 +630,33 @@ fn input_subscription() -> Subscription<Message> {
     )
 }
 
+fn theme_for_overlay(
+    _state: &Overlay,
+    _window: window::Id,
+) -> iced::Theme {
+    detect_cosmic_theme()
+}
+
+fn detect_cosmic_theme() -> iced::Theme {
+    let Ok(mode_config) =
+        cosmic::cosmic_theme::ThemeMode::config()
+    else {
+        return iced::Theme::Dark;
+    };
+    let Ok(is_dark) =
+        cosmic::cosmic_theme::ThemeMode::is_dark(
+            &mode_config,
+        )
+    else {
+        return iced::Theme::Dark;
+    };
+    if is_dark {
+        iced::Theme::Dark
+    } else {
+        iced::Theme::Light
+    }
+}
+
 pub fn run() {
     let result = iced::daemon(
         Overlay::new,
@@ -631,6 +664,7 @@ pub fn run() {
         Overlay::view,
     )
     .subscription(Overlay::subscription)
+    .theme(theme_for_overlay)
     .run();
 
     if let Err(e) = result {
