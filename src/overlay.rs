@@ -59,6 +59,7 @@ enum Message {
     CtrlState(bool),
     TogglePause,
     PauseSent,
+    Escape,
     Dismiss,
     Unfocused,
     SelectionSent,
@@ -225,8 +226,17 @@ impl Overlay {
         let open_links =
             config.open_links_in_browser;
 
-        let mut filter_cycle =
-            vec!["Text".into(), "Images".into(), "URLs".into()];
+        let has_favorites =
+            entries.iter().any(|e| e.favorite);
+        let mut filter_cycle: Vec<String> = Vec::new();
+        if has_favorites {
+            filter_cycle.push("Favorites".into());
+        }
+        filter_cycle.extend([
+            "Text".into(),
+            "Images".into(),
+            "URLs".into(),
+        ]);
         let mut langs: Vec<String> = highlights
             .values()
             .map(|hl| hl.language.clone())
@@ -412,10 +422,10 @@ impl Overlay {
                 .spawn();
                 return iced::exit();
             }
-            Message::SelectionSent
-            | Message::PauseSent => {
+            Message::SelectionSent => {
                 return iced::exit();
             }
+            Message::PauseSent => {}
             Message::TogglePause => {
                 return Task::perform(
                     async move {
@@ -491,6 +501,9 @@ impl Overlay {
                         }
                     }
                 }
+            }
+            Message::Escape => {
+                return iced::exit();
             }
             Message::Dismiss => {
                 if self.ctrl_held
@@ -662,84 +675,117 @@ impl Overlay {
                 }
             };
 
+        let search_w = if self.horizontal {
+            600.0
+        } else {
+            280.0
+        };
         let search_widget = container(search)
-            .width(Length::Fixed(300.0))
-            .center_x(Length::Fill);
+            .width(Length::Fixed(search_w));
 
         let filter_label =
             self.type_filter.as_deref();
-
         let paused = dbus::query_paused();
 
-        let mut header_row = Row::new()
-            .push(search_widget)
-            .spacing(8)
+        let mut badges_row = Row::new()
+            .spacing(6)
             .align_y(alignment::Vertical::Center);
 
         if let Some(label) = filter_label {
-            let badge = container(
-                text(label).size(12).color(
-                    Color::from_rgba8(
-                        100, 180, 255, 1.0,
-                    ),
-                ),
-            )
-            .padding([4, 8])
-            .style(|_theme: &iced::Theme| {
-                container::Style {
-                    background: Some(
+            badges_row = badges_row.push(
+                container(
+                    text(label).size(12).color(
                         Color::from_rgba8(
-                            100, 180, 255, 0.15,
-                        )
-                        .into(),
-                    ),
-                    border: iced::Border {
-                        color: Color::from_rgba8(
-                            100, 180, 255, 0.6,
+                            100, 180, 255, 1.0,
                         ),
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..Default::default()
-                }
-            });
-            header_row = header_row.push(badge);
+                    ),
+                )
+                .padding([4, 8])
+                .style(|_theme: &iced::Theme| {
+                    container::Style {
+                        background: Some(
+                            Color::from_rgba8(
+                                100, 180, 255, 0.15,
+                            )
+                            .into(),
+                        ),
+                        border: iced::Border {
+                            color: Color::from_rgba8(
+                                100, 180, 255, 0.6,
+                            ),
+                            width: 1.0,
+                            radius: 4.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
+            );
         }
 
         if paused {
-            let badge = container(
-                text("PAUSED")
-                    .size(12)
-                    .color(Color::from_rgba8(
-                        255, 170, 0, 1.0,
-                    )),
-            )
-            .padding([4, 8])
-            .style(|_theme: &iced::Theme| {
-                container::Style {
-                    background: Some(
-                        Color::from_rgba8(
-                            255, 170, 0, 0.15,
-                        )
-                        .into(),
-                    ),
-                    border: iced::Border {
-                        color: Color::from_rgba8(
-                            255, 170, 0, 0.6,
+            badges_row = badges_row.push(
+                container(
+                    text("PAUSED")
+                        .size(12)
+                        .color(Color::from_rgba8(
+                            255, 170, 0, 1.0,
+                        )),
+                )
+                .padding([4, 8])
+                .style(|_theme: &iced::Theme| {
+                    container::Style {
+                        background: Some(
+                            Color::from_rgba8(
+                                255, 170, 0, 0.15,
+                            )
+                            .into(),
                         ),
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..Default::default()
-                }
-            });
-            header_row = header_row.push(badge);
+                        border: iced::Border {
+                            color: Color::from_rgba8(
+                                255, 170, 0, 0.6,
+                            ),
+                            width: 1.0,
+                            radius: 4.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
+            );
         }
 
         let header: Element<'_, Message> =
-            header_row.into();
+            if self.horizontal {
+                Row::new()
+                    .push(
+                        container(
+                            iced::widget::Space::new(),
+                        )
+                        .width(Length::Fill),
+                    )
+                    .push(search_widget)
+                    .push(
+                        container(badges_row)
+                            .width(Length::Fill)
+                            .padding([0, 0, 0, 8]),
+                    )
+                    .align_y(
+                        alignment::Vertical::Center,
+                    )
+                    .width(Length::Fill)
+                    .into()
+            } else {
+                column![
+                    container(search_widget)
+                        .center_x(Length::Fill),
+                    container(badges_row)
+                        .center_x(Length::Fill),
+                ]
+                .spacing(4)
+                .width(Length::Fill)
+                .into()
+            };
 
-        let layout: Element<'_, Message> = column![
+        let inner: Element<'_, Message> = column![
             header,
             cards_widget,
         ]
@@ -748,6 +794,8 @@ impl Overlay {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
+
+        let layout: Element<'_, Message> = inner;
 
         container(layout)
             .width(Length::Fill)
@@ -774,6 +822,7 @@ impl Overlay {
                 return true;
             };
             match f.as_str() {
+                "Favorites" => e.favorite,
                 "Text" => {
                     e.entry_type == EntryType::Text
                 }
@@ -1316,8 +1365,10 @@ fn input_subscription() -> Subscription<Message> {
                     iced::keyboard::Key::Named(named) => {
                         use iced::keyboard::key::Named;
                         match named {
-                            Named::Escape
-                            | Named::Enter => {
+                            Named::Escape => {
+                                Some(Message::Escape)
+                            }
+                            Named::Enter => {
                                 Some(Message::Dismiss)
                             }
                             Named::ArrowRight
