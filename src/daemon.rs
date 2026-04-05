@@ -14,6 +14,9 @@ use crate::entry;
 const DEDUP_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(2);
 
+const SELECTION_ECHO_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(3);
+
 struct Daemon {
     db: Arc<Mutex<Database>>,
     config: Config,
@@ -22,6 +25,7 @@ struct Daemon {
     last_text_store: Option<(Instant, i64)>,
     last_sync_hash: Option<u64>,
     last_store_hash: Option<(Instant, u64)>,
+    last_selection_hash: Option<(Instant, u64)>,
 }
 
 impl Daemon {
@@ -34,6 +38,7 @@ impl Daemon {
             last_text_store: None,
             last_sync_hash: None,
             last_store_hash: None,
+            last_selection_hash: None,
         }
     }
 
@@ -75,6 +80,21 @@ impl Daemon {
                         self.last_sync_hash = None;
                         tracing::debug!(
                             "Skipping sync echo ({source})"
+                        );
+                        return;
+                    }
+                }
+
+                if let Some((time, sel_hash)) =
+                    self.last_selection_hash
+                {
+                    if sel_hash == content_hash
+                        && time.elapsed()
+                            < SELECTION_ECHO_WINDOW
+                    {
+                        tracing::debug!(
+                            "Skipping selection echo \
+                             ({source})"
                         );
                         return;
                     }
@@ -191,18 +211,32 @@ impl Daemon {
                 let db = self.db.clone();
                 let entry = {
                     let db = db.lock().await;
+                    let _ = db.touch(id);
                     db.get_entry(id)
                 };
                 match entry {
                     Ok(Some(entry)) => {
-                        clipboard::copy_to_clipboard(&entry).await;
-                        tracing::info!("Copied entry {id}");
+                        let hash =
+                            entry.content_hash();
+                        self.last_selection_hash =
+                            Some((Instant::now(), hash));
+                        clipboard::copy_to_clipboard(
+                            &entry,
+                        )
+                        .await;
+                        tracing::info!(
+                            "Copied entry {id}"
+                        );
                     }
                     Ok(None) => {
-                        tracing::warn!("Entry {id} not found");
+                        tracing::warn!(
+                            "Entry {id} not found"
+                        );
                     }
                     Err(e) => {
-                        tracing::error!("Failed to load entry: {e}");
+                        tracing::error!(
+                            "Failed to load entry: {e}"
+                        );
                     }
                 }
                 self.kill_overlay().await;

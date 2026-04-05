@@ -31,6 +31,7 @@ struct Overlay {
     focused_index: usize,
     show_thumbnails: bool,
     show_remote_thumbnails: bool,
+    active_entry_id: Option<i64>,
 }
 
 impl Overlay {
@@ -54,6 +55,9 @@ impl Overlay {
             .list_entries(config.max_entries)
             .unwrap_or_default();
 
+        let active_entry_id =
+            detect_active_entry(&entries);
+
         let overlay = Self {
             entries,
             search_query: String::new(),
@@ -61,6 +65,7 @@ impl Overlay {
             show_thumbnails: config.show_thumbnails,
             show_remote_thumbnails:
                 config.show_remote_thumbnails,
+            active_entry_id,
         };
 
         let id = window::Id::unique();
@@ -168,9 +173,13 @@ impl Overlay {
                     .enumerate()
                     .map(|(i, entry)| {
                         let is_focused = i == self.focused_index;
+                        let is_active =
+                            self.active_entry_id
+                                == Some(entry.id);
                         entry_row(
                             entry,
                             is_focused,
+                            is_active,
                             self.show_thumbnails,
                             self.show_remote_thumbnails,
                         )
@@ -223,12 +232,18 @@ impl Overlay {
 fn entry_row<'a>(
     entry: &'a Entry,
     focused: bool,
+    active: bool,
     show_thumbnails: bool,
     show_remote_thumbnails: bool,
 ) -> Element<'a, Message> {
     use crate::entry::{EntryType, is_image_url};
 
-    let fav = if entry.favorite { "\u{2b50} " } else { "" };
+    let prefix = match (active, entry.favorite) {
+        (true, true) => "\u{1f4cb} \u{2b50} ",
+        (true, false) => "\u{1f4cb} ",
+        (false, true) => "\u{2b50} ",
+        (false, false) => "",
+    };
 
     let content: Element<'a, Message> = match &entry.entry_type {
         EntryType::Image => {
@@ -245,7 +260,7 @@ fn entry_row<'a>(
                             .width(48)
                             .height(48);
                     let label =
-                        text(format!("{fav}Copied Image"))
+                        text(format!("{prefix}Copied Image"))
                             .width(Length::Fill);
                     row![thumbnail, label]
                         .spacing(8)
@@ -255,12 +270,12 @@ fn entry_row<'a>(
                         .width(Length::Fill)
                         .into()
                 } else {
-                    text(format!("{fav}[Image]"))
+                    text(format!("{prefix}[Image]"))
                         .width(Length::Fill)
                         .into()
                 }
             } else {
-                text(format!("{fav}[Image]"))
+                text(format!("{prefix}[Image]"))
                     .width(Length::Fill)
                     .into()
             }
@@ -279,7 +294,7 @@ fn entry_row<'a>(
                             .width(48)
                             .height(48);
                     let label = text(format!(
-                        "{fav}\u{1f5bc}\u{fe0f} {url}"
+                        "{prefix}\u{1f5bc}\u{fe0f} {url}"
                     ))
                     .width(Length::Fill);
                     row![thumbnail, label]
@@ -291,7 +306,7 @@ fn entry_row<'a>(
                         .into()
                 } else {
                     text(format!(
-                        "{fav}\u{1f5bc}\u{fe0f} {url}"
+                        "{prefix}\u{1f5bc}\u{fe0f} {url}"
                     ))
                     .width(Length::Fill)
                     .into()
@@ -302,7 +317,7 @@ fn entry_row<'a>(
                 } else {
                     "\u{1f517}"
                 };
-                text(format!("{fav}{prefix} {url}"))
+                text(format!("{prefix}{prefix} {url}"))
                     .width(Length::Fill)
                     .into()
             }
@@ -312,7 +327,7 @@ fn entry_row<'a>(
                 entry.text_content().unwrap_or("[empty]");
             let truncated: String =
                 content.chars().take(100).collect();
-            text(format!("{fav}{truncated}"))
+            text(format!("{prefix}{truncated}"))
                 .width(Length::Fill)
                 .into()
         }
@@ -323,17 +338,21 @@ fn entry_row<'a>(
         .width(Length::Fill)
         .padding(8);
 
-    if focused {
+    if focused || active {
+        let is_active = active;
         container(btn)
-            .style(|theme: &iced::Theme| {
+            .style(move |theme: &iced::Theme| {
                 let palette = theme.palette();
+                let alpha = if is_active { 0.08 } else { 0.15 };
+                let color = if is_active {
+                    palette.success
+                } else {
+                    palette.primary
+                };
                 container::Style {
                     background: Some(
-                        iced::Color {
-                            a: 0.15,
-                            ..palette.primary
-                        }
-                        .into(),
+                        iced::Color { a: alpha, ..color }
+                            .into(),
                     ),
                     ..Default::default()
                 }
@@ -342,6 +361,48 @@ fn entry_row<'a>(
     } else {
         btn.into()
     }
+}
+
+fn detect_active_entry(entries: &[Entry]) -> Option<i64> {
+    let output = std::process::Command::new("wl-paste")
+        .arg("--no-newline")
+        .output()
+        .ok()?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+
+    let clip = &output.stdout;
+    for entry in entries {
+        if let Some(text) = entry.text_content() {
+            if text.as_bytes() == clip {
+                return Some(entry.id);
+            }
+        }
+    }
+
+    let img_output = std::process::Command::new("wl-paste")
+        .args(["--no-newline", "--type", "image"])
+        .output()
+        .ok()?;
+
+    if !img_output.status.success()
+        || img_output.stdout.is_empty()
+    {
+        return None;
+    }
+
+    let clip_img = &img_output.stdout;
+    for entry in entries {
+        if let Some((_mime, data)) = entry.image_data() {
+            if data == clip_img.as_slice() {
+                return Some(entry.id);
+            }
+        }
+    }
+
+    None
 }
 
 fn input_subscription() -> Subscription<Message> {

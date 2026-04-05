@@ -97,28 +97,46 @@ impl Database {
         Ok(id)
     }
 
-    fn find_duplicate(&self, data: &MimeDataMap) -> Result<Option<i64>, DbError> {
-        for mime in [
+    pub fn touch(&self, id: i64) -> Result<(), DbError> {
+        let now = chrono::Utc::now().timestamp_millis();
+        self.conn.execute(
+            "UPDATE entries SET created_at = ? WHERE id = ?",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    fn find_duplicate(
+        &self,
+        data: &MimeDataMap,
+    ) -> Result<Option<i64>, DbError> {
+        let text_mimes = [
             "text/plain;charset=utf-8",
             "text/plain",
-        ] {
-            let Some(content) = data.get(mime) else {
-                continue;
-            };
-            let trimmed = String::from_utf8_lossy(content);
-            let trimmed = trimmed.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
+        ];
 
+        let text_content = text_mimes.iter().find_map(|m| {
+            data.get(*m).and_then(|c| {
+                let s = String::from_utf8_lossy(c);
+                let t = s.trim().to_string();
+                if t.is_empty() { None } else { Some(t) }
+            })
+        });
+
+        if let Some(trimmed) = text_content {
             let mut stmt = self.conn.prepare(
                 "SELECT c.entry_id FROM contents c
-                 WHERE c.mime = ? AND TRIM(c.content) = ?
+                 WHERE c.mime IN (?, ?)
+                 AND TRIM(c.content) = ?
                  LIMIT 1",
             )?;
 
             if let Ok(id) = stmt.query_row(
-                params![mime, trimmed.as_bytes()],
+                params![
+                    text_mimes[0],
+                    text_mimes[1],
+                    trimmed.as_bytes(),
+                ],
                 |row| row.get::<_, i64>(0),
             ) {
                 return Ok(Some(id));

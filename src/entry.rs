@@ -75,6 +75,19 @@ impl Entry {
         None
     }
 
+    pub fn content_hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        if let Some(text) = self.text_content() {
+            text.hash(&mut hasher);
+        } else if let Some((_mime, data)) = self.image_data()
+        {
+            data.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     pub fn thumbnail_data(&self) -> Option<&[u8]> {
         self.contents
             .get(THUMBNAIL_MIME)
