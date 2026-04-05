@@ -19,6 +19,7 @@ enum Message {
     SearchChanged(String),
     SelectEntry(i64),
     KeyEvent(iced::keyboard::key::Named),
+    Unfocused,
     SelectionSent,
 }
 
@@ -97,7 +98,7 @@ impl Overlay {
                     |_| Message::SelectionSent,
                 );
             }
-            Message::SelectionSent => {
+            Message::Unfocused | Message::SelectionSent => {
                 return iced::exit();
             }
             Message::KeyEvent(key) => match key {
@@ -288,6 +289,15 @@ fn input_subscription() -> Subscription<Message> {
                         None
                     }
                 }
+                iced::Event::PlatformSpecific(
+                    iced::event::PlatformSpecific::Wayland(
+                        iced::event::wayland::Event::Layer(
+                            iced::event::wayland::LayerEvent::Unfocused,
+                            _,
+                            _,
+                        ),
+                    ),
+                ) => Some(Message::Unfocused),
                 _ => None,
             }
         },
