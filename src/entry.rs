@@ -97,14 +97,282 @@ impl Entry {
 
 #[allow(dead_code)] // available for future CLI use
 pub fn detect_syntax_name(text: &str) -> String {
-    let ss = syntect::parsing::SyntaxSet::load_defaults_newlines();
+    let ss = two_face::syntax::extra_newlines();
     let syntax = ss
         .find_syntax_by_first_line(text)
         .unwrap_or_else(|| ss.find_syntax_plain_text());
     syntax.name.clone()
 }
 
+fn ts_parse_score(
+    lang: &tree_sitter::Language,
+    text: &str,
+) -> f64 {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(lang).is_err() {
+        return 0.0;
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return 0.0;
+    };
+    let root = tree.root_node();
+    let total = root.descendant_count() as usize;
+    if total == 0 {
+        return 0.0;
+    }
+    let mut errors = 0usize;
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.is_error() || node.is_missing() {
+            errors += 1;
+        }
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                stack.push(child);
+            }
+        }
+    }
+    1.0 - (errors as f64 / total as f64)
+}
+
+fn ts_language_for_ext(
+    ext: &str,
+) -> Option<tree_sitter::Language> {
+    Some(match ext {
+        "json" => tree_sitter_json::LANGUAGE.into(),
+        "py" => tree_sitter_python::LANGUAGE.into(),
+        "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "go" => tree_sitter_go::LANGUAGE.into(),
+        "js" => {
+            tree_sitter_javascript::LANGUAGE.into()
+        }
+        "sh" => tree_sitter_bash::LANGUAGE.into(),
+        "yaml" => tree_sitter_yaml::LANGUAGE.into(),
+        "toml" => tree_sitter_toml_ng::LANGUAGE.into(),
+        _ => return None,
+    })
+}
+
+fn guess_candidates(text: &str) -> Vec<&'static str> {
+    let t = text.trim();
+    if t.is_empty() {
+        return vec![];
+    }
+
+    if t.starts_with('{') && t.contains('"') {
+        return vec!["json"];
+    }
+    if t.starts_with('[') {
+        return vec!["json", "toml"];
+    }
+    if t.starts_with("<?xml") || t.starts_with("<svg") {
+        return vec!["xml"];
+    }
+    if t.starts_with("<!") || t.starts_with("<html") {
+        return vec!["html"];
+    }
+    if t.starts_with("---\n")
+        || t.starts_with("---\r\n")
+    {
+        return vec!["yaml", "toml"];
+    }
+
+    let mut candidates = Vec::new();
+
+    let first_lines: Vec<&str> =
+        t.lines().take(15).collect();
+    let trimmed_lines: Vec<&str> = first_lines
+        .iter()
+        .map(|l| l.trim_start())
+        .collect();
+
+    // Dockerfile / Containerfile
+    if trimmed_lines.iter().any(|l| {
+        l.starts_with("FROM ")
+            || l.starts_with("RUN ")
+            || l.starts_with("COPY ")
+            || l.starts_with("WORKDIR ")
+            || l.starts_with("ENTRYPOINT ")
+            || l.starts_with("CMD ")
+            || l.starts_with("EXPOSE ")
+            || l.starts_with("ENV ")
+            || l.starts_with("ARG ")
+            || l.starts_with("ADD ")
+    }) && trimmed_lines
+        .iter()
+        .any(|l| l.starts_with("FROM "))
+    {
+        candidates.push("dockerfile");
+    }
+
+    // Rust
+    if t.contains("fn ")
+        && (t.contains("let ") || t.contains("-> "))
+    {
+        candidates.push("rs");
+    }
+
+    // Python
+    let has_py_imports = trimmed_lines.iter().any(|l| {
+        l.starts_with("import ")
+            || (l.starts_with("from ")
+                && l.contains(" import "))
+    });
+    if (has_py_imports && !t.contains(';'))
+        || (t.contains("def ") && t.contains(':'))
+    {
+        candidates.push("py");
+    }
+
+    // Shell / Bash (shebang or common shell patterns)
+    if t.starts_with("#!") {
+        if t.contains("python") {
+            candidates.push("py");
+        } else {
+            candidates.push("sh");
+        }
+    } else if trimmed_lines.iter().any(|l| {
+        l.starts_with("if [")
+            || l.starts_with("for ")
+                && l.contains(" in ")
+                && l.ends_with("; do")
+            || l.starts_with("case ")
+                && l.contains(" in")
+            || l.starts_with("then")
+            || l.starts_with("fi")
+            || l.starts_with("done")
+            || l.starts_with("echo ")
+            || l.starts_with("export ")
+            || l.starts_with("set -")
+    }) {
+        candidates.push("sh");
+    }
+
+    // Go
+    if t.contains("func ")
+        && (t.contains("package ")
+            || t.contains(":= "))
+    {
+        candidates.push("go");
+    }
+
+    // TypeScript
+    if t.contains("interface ")
+        && (t.contains(": string")
+            || t.contains(": number")
+            || t.contains(": boolean"))
+    {
+        candidates.push("ts");
+    }
+
+    // JavaScript
+    if t.contains("function ")
+        || t.contains("module.exports")
+        || (t.contains("const ")
+            && (t.contains("=>")
+                || t.contains("require(")))
+    {
+        candidates.push("js");
+    }
+
+    // CSS
+    if t.contains('{')
+        && t.contains('}')
+        && (t.contains("color:")
+            || t.contains("display:")
+            || t.contains("margin:")
+            || t.contains("padding:")
+            || t.contains("font-"))
+    {
+        candidates.push("css");
+    }
+
+    // SQL
+    if t.contains("SELECT ")
+        || t.contains("INSERT ")
+        || t.contains("CREATE TABLE")
+        || t.contains("ALTER TABLE")
+        || t.contains("DROP TABLE")
+    {
+        candidates.push("sql");
+    }
+
+    // Markdown
+    if trimmed_lines.iter().any(|l| {
+        l.starts_with("# ") || l.starts_with("## ")
+    }) && t.contains('\n')
+        && (t.contains("```") || t.contains("- "))
+    {
+        candidates.push("md");
+    }
+
+    // TOML (section headers + key = value)
+    let has_section_header =
+        trimmed_lines.iter().any(|l| {
+            l.starts_with('[')
+                && l.ends_with(']')
+                && !l.contains('{')
+        });
+    if has_section_header && t.contains(" = ") {
+        candidates.push("toml");
+    }
+
+    // YAML (last — aggressive check)
+    if candidates.is_empty()
+        && t.lines().count() > 2
+    {
+        let non_empty: Vec<&str> = trimmed_lines
+            .iter()
+            .filter(|l| !l.is_empty())
+            .copied()
+            .collect();
+        let has_kv = non_empty.iter().any(|l| {
+            !l.starts_with(' ')
+                && !l.starts_with('#')
+                && l.contains(": ")
+        });
+        let all_yaml = non_empty.iter().all(|l| {
+            l.contains(": ")
+                || l.starts_with('#')
+                || l.starts_with("- ")
+                || l.starts_with("  ")
+        });
+        if has_kv && all_yaml {
+            candidates.push("yaml");
+        }
+    }
+
+    candidates
+}
+
 fn guess_extension(text: &str) -> Option<&'static str> {
+    let candidates = guess_candidates(text);
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
+    }
+
+    let mut best: Option<(&str, f64)> = None;
+    for ext in &candidates {
+        let Some(lang) = ts_language_for_ext(ext) else {
+            continue;
+        };
+        let score = ts_parse_score(&lang, text);
+        if best
+            .as_ref()
+            .map(|(_, s)| score > *s)
+            .unwrap_or(true)
+        {
+            best = Some((ext, score));
+        }
+    }
+    Some(best.map(|(ext, _)| ext).unwrap_or(candidates[0]))
+}
+
+#[allow(dead_code)]
+fn guess_extension_heuristic_only(text: &str) -> Option<&'static str> {
     let t = text.trim();
     if t.is_empty() {
         return None;
@@ -207,24 +475,51 @@ fn guess_extension(text: &str) -> Option<&'static str> {
     None
 }
 
+fn ext_to_display_name(ext: &str) -> String {
+    match ext {
+        "rs" => "Rust",
+        "py" => "Python",
+        "js" => "JavaScript",
+        "ts" => "TypeScript",
+        "go" => "Go",
+        "sh" => "Shell",
+        "json" => "JSON",
+        "yaml" => "YAML",
+        "toml" => "TOML",
+        "ini" => "INI",
+        "sql" => "SQL",
+        "xml" => "XML",
+        "html" => "HTML",
+        "css" => "CSS",
+        "md" => "Markdown",
+        "dockerfile" => "Dockerfile",
+        other => other,
+    }
+    .to_string()
+}
+
 pub fn highlight_text(
     text: &str,
     is_dark: bool,
 ) -> (String, Vec<([u8; 4], String)>) {
     let ss =
-        syntect::parsing::SyntaxSet::load_defaults_newlines();
+        two_face::syntax::extra_newlines();
     let ts =
         syntect::highlighting::ThemeSet::load_defaults();
 
-    let syntax = ss
-        .find_syntax_by_first_line(text)
-        .or_else(|| {
-            guess_extension(text).and_then(|ext| {
-                ss.find_syntax_by_extension(ext)
-            })
-        })
+    let guessed_ext = guess_extension(text);
+
+    let syntax = guessed_ext
+        .and_then(|ext| ss.find_syntax_by_extension(ext))
         .unwrap_or_else(|| ss.find_syntax_plain_text());
-    let language = syntax.name.clone();
+
+    let language = if syntax.name == "Plain Text" {
+        guessed_ext
+            .map(ext_to_display_name)
+            .unwrap_or_else(|| "Plain Text".to_string())
+    } else {
+        syntax.name.clone()
+    };
 
     let theme_name = if is_dark {
         "base16-ocean.dark"
