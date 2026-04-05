@@ -1,9 +1,12 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::{Mutex, mpsc};
 
 use crate::clipboard;
+use crate::config::Config;
 use crate::db::Database;
 use crate::dbus::{self, PopupAction};
 
@@ -12,18 +15,22 @@ const DEDUP_WINDOW: std::time::Duration =
 
 struct Daemon {
     db: Arc<Mutex<Database>>,
+    config: Config,
     overlay_child: Option<tokio::process::Child>,
     watcher_children: Vec<tokio::process::Child>,
     last_text_store: Option<(Instant, i64)>,
+    last_sync_hash: Option<u64>,
 }
 
 impl Daemon {
-    fn new(db: Database) -> Self {
+    fn new(db: Database, config: Config) -> Self {
         Self {
             db: Arc::new(Mutex::new(db)),
+            config,
             overlay_child: None,
             watcher_children: Vec::new(),
             last_text_store: None,
+            last_sync_hash: None,
         }
     }
 
@@ -54,17 +61,30 @@ impl Daemon {
                     tracing::error!("Failed to clear: {e}");
                 }
             }
-            PopupAction::Store { mime, content } => {
+            PopupAction::Store { mime, content, source } => {
                 if content.len() < 2 {
                     return;
                 }
+
+                let content_hash = hash_content(&content);
+                if let Some(sync_hash) = self.last_sync_hash {
+                    if sync_hash == content_hash {
+                        self.last_sync_hash = None;
+                        tracing::debug!(
+                            "Skipping sync echo ({source})"
+                        );
+                        return;
+                    }
+                }
+
                 let is_image = mime.starts_with("image/");
                 tracing::info!(
-                    "Store: {} ({} bytes)",
+                    "Store: {} ({} bytes, {source})",
                     mime,
                     content.len()
                 );
 
+                let mut image_superseded_text = false;
                 if is_image {
                     if let Some((time, text_id)) =
                         self.last_text_store.take()
@@ -86,13 +106,14 @@ impl Daemon {
                                      {text_id} (image \
                                      supersedes)"
                                 );
+                                image_superseded_text = true;
                             }
                         }
                     }
                 }
 
                 let mut data = crate::entry::MimeDataMap::new();
-                data.insert(mime, content);
+                data.insert(mime.clone(), content.clone());
                 let db = self.db.clone();
                 let result = {
                     let db = db.lock().await;
@@ -118,6 +139,24 @@ impl Daemon {
                             "Failed to insert: {e}"
                         );
                     }
+                }
+
+                let should_sync = self.config.sync_selections
+                    && (!is_image || image_superseded_text);
+                if should_sync {
+                    let target = match source.as_str() {
+                        "primary" => "clipboard",
+                        _ => "primary",
+                    };
+                    self.last_sync_hash =
+                        Some(content_hash);
+                    clipboard::sync_to_selection(
+                        target, &content,
+                    )
+                    .await;
+                    tracing::debug!(
+                        "Synced to {target}"
+                    );
                 }
             }
             PopupAction::SelectEntry { id } => {
@@ -226,6 +265,36 @@ impl Daemon {
             Err(e) => tracing::error!("Text watcher failed: {e}"),
         }
 
+        let primary = tokio::process::Command::new("wl-paste")
+            .args([
+                "--no-newline",
+                "--primary",
+                "--watch",
+                exe_str,
+                "store",
+                "--mime",
+                "text/plain",
+                "--source",
+                "primary",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+
+        match primary {
+            Ok(child) => {
+                tracing::info!(
+                    "Primary watcher started (PID {})",
+                    child.id().unwrap_or(0)
+                );
+                self.watcher_children.push(child);
+            }
+            Err(e) => {
+                tracing::error!("Primary watcher failed: {e}")
+            }
+        }
+
         let image = tokio::process::Command::new("wl-paste")
             .args([
                 "--no-newline",
@@ -264,7 +333,13 @@ impl Daemon {
     }
 }
 
-pub async fn run(db: Database) {
+fn hash_content(data: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub async fn run(db: Database, config: Config) {
     dbus::init_visible();
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -277,7 +352,11 @@ pub async fn run(db: Database) {
         }
     };
 
-    let mut daemon = Daemon::new(db);
+    tracing::info!(
+        "sync_selections = {}",
+        config.sync_selections
+    );
+    let mut daemon = Daemon::new(db, config);
     daemon.spawn_clipboard_watchers();
 
     tracing::info!("Daemon running (no Wayland connection)");

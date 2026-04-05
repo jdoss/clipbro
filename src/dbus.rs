@@ -24,7 +24,7 @@ pub enum PopupAction {
     Show,
     Hide,
     Clear,
-    Store { mime: String, content: Vec<u8> },
+    Store { mime: String, content: Vec<u8>, source: String },
     SelectEntry { id: i64 },
 }
 
@@ -50,8 +50,15 @@ impl ClipbroDBus {
         let _ = self.tx.send(PopupAction::Clear);
     }
 
-    async fn store(&self, mime: String, content: Vec<u8>) {
-        let _ = self.tx.send(PopupAction::Store { mime, content });
+    async fn store(
+        &self,
+        mime: String,
+        content: Vec<u8>,
+        source: String,
+    ) {
+        let _ = self
+            .tx
+            .send(PopupAction::Store { mime, content, source });
     }
 
     async fn select_entry(&self, id: i64) {
@@ -86,13 +93,13 @@ pub async fn send_action(action: PopupAction) -> Result<(), zbus::Error> {
     let conn = zbus::Connection::session().await?;
 
     match action {
-        PopupAction::Store { mime, content } => {
+        PopupAction::Store { mime, content, source } => {
             conn.call_method(
                 Some(BUS_NAME),
                 OBJECT_PATH,
                 Some("io.github.jdoss.clipbro"),
                 "Store",
-                &(mime, content),
+                &(mime, content, source),
             )
             .await?;
         }

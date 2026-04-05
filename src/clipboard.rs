@@ -27,6 +27,16 @@ async fn wl_copy(args: &[&str], data: &[u8]) {
     // Don't wait — it exits when another app takes ownership.
 }
 
+pub async fn sync_to_selection(target: &str, data: &[u8]) {
+    match target {
+        "clipboard" => wl_copy(&[], data).await,
+        "primary" => wl_copy(&["--primary"], data).await,
+        other => {
+            tracing::warn!("Unknown sync target: {other}");
+        }
+    }
+}
+
 pub async fn copy_to_clipboard(entry: &Entry) {
     if let Some(text) = entry.text_content() {
         let data = text.as_bytes().to_vec();

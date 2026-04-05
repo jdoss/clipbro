@@ -36,6 +36,8 @@ enum Command {
     Store {
         #[arg(long, default_value = "text/plain")]
         mime: String,
+        #[arg(long, default_value = "clipboard")]
+        source: String,
     },
     /// Open the overlay UI (spawned by daemon)
     Overlay,
@@ -73,8 +75,8 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Store { mime }) => {
-            run_store(mime);
+        Some(Command::Store { mime, source }) => {
+            run_store(mime, source);
         }
         Some(Command::Overlay) => {
             setup_logging();
@@ -90,6 +92,7 @@ fn main() {
                 Command::Clear => dbus::PopupAction::Clear,
                 Command::Store { .. }
                 | Command::Overlay => unreachable!(),
+
             };
 
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -115,13 +118,15 @@ fn main() {
                 }
             };
 
+            let config = config::Config::load();
+
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(daemon::run(db));
+            rt.block_on(daemon::run(db, config));
         }
     }
 }
 
-fn run_store(mime: String) {
+fn run_store(mime: String, source: String) {
     use std::io::Read;
     let mut content = Vec::new();
     std::io::stdin().read_to_end(&mut content).unwrap_or(0);
@@ -143,7 +148,7 @@ fn run_store(mime: String) {
         dbus::OBJECT_PATH,
         Some("io.github.jdoss.clipbro"),
         "Store",
-        &(mime, content),
+        &(mime, content, source),
     );
 }
 
