@@ -20,6 +20,7 @@ struct Daemon {
     watcher_children: Vec<tokio::process::Child>,
     last_text_store: Option<(Instant, i64)>,
     last_sync_hash: Option<u64>,
+    last_store_hash: Option<(Instant, u64)>,
 }
 
 impl Daemon {
@@ -31,6 +32,7 @@ impl Daemon {
             watcher_children: Vec::new(),
             last_text_store: None,
             last_sync_hash: None,
+            last_store_hash: None,
         }
     }
 
@@ -76,6 +78,22 @@ impl Daemon {
                         return;
                     }
                 }
+
+                if let Some((time, prev_hash)) =
+                    self.last_store_hash
+                {
+                    if prev_hash == content_hash
+                        && time.elapsed()
+                            < std::time::Duration::from_secs(1)
+                    {
+                        tracing::debug!(
+                            "Skipping duplicate store"
+                        );
+                        return;
+                    }
+                }
+                self.last_store_hash =
+                    Some((Instant::now(), content_hash));
 
                 let is_image = mime.starts_with("image/");
                 tracing::info!(

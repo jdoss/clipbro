@@ -105,9 +105,31 @@ impl Database {
         for mime in [
             "text/plain;charset=utf-8",
             "text/plain",
-            "image/png",
-            "image/jpeg",
         ] {
+            let Some(content) = data.get(mime) else {
+                continue;
+            };
+            let trimmed = String::from_utf8_lossy(content);
+            let trimmed = trimmed.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let mut stmt = self.conn.prepare(
+                "SELECT c.entry_id FROM contents c
+                 WHERE c.mime = ? AND TRIM(c.content) = ?
+                 LIMIT 1",
+            )?;
+
+            if let Ok(id) = stmt.query_row(
+                params![mime, trimmed.as_bytes()],
+                |row| row.get::<_, i64>(0),
+            ) {
+                return Ok(Some(id));
+            }
+        }
+
+        for mime in ["image/png", "image/jpeg"] {
             let Some(content) = data.get(mime) else {
                 continue;
             };
@@ -118,9 +140,10 @@ impl Database {
                  LIMIT 1",
             )?;
 
-            if let Ok(id) =
-                stmt.query_row(params![mime, content], |row| row.get::<_, i64>(0))
-            {
+            if let Ok(id) = stmt.query_row(
+                params![mime, content],
+                |row| row.get::<_, i64>(0),
+            ) {
                 return Ok(Some(id));
             }
         }
