@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tokio::sync::{Mutex, mpsc};
 
-use crate::clipboard;
+use crate::clipboard::ClipboardService;
 use crate::config::Config;
 use crate::db::Database;
 use crate::dbus::{self, PopupAction};
@@ -20,9 +20,10 @@ const SELECTION_ECHO_WINDOW: std::time::Duration =
 const PRIMARY_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(300);
 
-struct Daemon {
+struct Daemon<C: ClipboardService> {
     db: Arc<Mutex<Database>>,
     config: Config,
+    clipboard: C,
     overlay_child: Option<tokio::process::Child>,
     watcher_children: Vec<tokio::process::Child>,
     last_text_store: Option<(Instant, i64)>,
@@ -35,11 +36,16 @@ struct Daemon {
         Option<mpsc::UnboundedSender<PopupAction>>,
 }
 
-impl Daemon {
-    fn new(db: Database, config: Config) -> Self {
+impl<C: ClipboardService> Daemon<C> {
+    fn new(
+        db: Database,
+        config: Config,
+        clipboard: C,
+    ) -> Self {
         Self {
             db: Arc::new(Mutex::new(db)),
             config,
+            clipboard,
             overlay_child: None,
             watcher_children: Vec::new(),
             last_text_store: None,
@@ -51,7 +57,10 @@ impl Daemon {
         }
     }
 
-    async fn handle_action(&mut self, action: PopupAction) {
+    async fn handle_action(
+        &mut self,
+        action: PopupAction,
+    ) {
         match action {
             PopupAction::Toggle => {
                 if self.overlay_running() {
@@ -75,7 +84,9 @@ impl Daemon {
                     db.clear()
                 };
                 if let Err(e) = result {
-                    tracing::error!("Failed to clear: {e}");
+                    tracing::error!(
+                        "Failed to clear: {e}"
+                    );
                 }
             }
             PopupAction::Store {
@@ -83,218 +94,230 @@ impl Daemon {
                 content,
                 source,
             } => {
-                if source == "primary" {
-                    if let Some(h) =
-                        self.primary_debounce.take()
-                    {
-                        h.abort();
-                    }
-                    if let Some(tx) = &self.action_tx {
-                        let tx = tx.clone();
-                        let m = mime.clone();
-                        let c = content.clone();
-                        self.primary_debounce =
-                            Some(tokio::spawn(
-                                async move {
-                                    tokio::time::sleep(
-                                        PRIMARY_DEBOUNCE,
-                                    )
-                                    .await;
-                                    let _ = tx.send(
-                                        PopupAction::Store {
-                                            mime: m,
-                                            content: c,
-                                            source:
-                                                "primary-debounced"
-                                                    .into(),
-                                        },
-                                    );
-                                },
-                            ));
-                        return;
-                    }
-                }
+                self.handle_store(
+                    mime, content, source,
+                )
+                .await;
+            }
+            PopupAction::SelectEntry { id } => {
+                self.handle_select_entry(id).await;
+            }
+        }
+    }
 
-                if content.len() < 2 {
-                    return;
-                }
-
-                let content_hash = hash_content(&content);
-                if let Some(sync_hash) = self.last_sync_hash {
-                    if sync_hash == content_hash {
-                        self.last_sync_hash = None;
-                        tracing::debug!(
-                            "Skipping sync echo ({source})"
+    async fn handle_store(
+        &mut self,
+        mime: String,
+        content: Vec<u8>,
+        source: String,
+    ) {
+        if source == "primary" {
+            if let Some(h) =
+                self.primary_debounce.take()
+            {
+                h.abort();
+            }
+            if let Some(tx) = &self.action_tx {
+                let tx = tx.clone();
+                let m = mime.clone();
+                let c = content.clone();
+                self.primary_debounce =
+                    Some(tokio::spawn(async move {
+                        tokio::time::sleep(
+                            PRIMARY_DEBOUNCE,
+                        )
+                        .await;
+                        let _ = tx.send(
+                            PopupAction::Store {
+                                mime: m,
+                                content: c,
+                                source:
+                                    "primary-debounced"
+                                        .into(),
+                            },
                         );
-                        return;
-                    }
-                }
+                    }));
+                return;
+            }
+        }
 
-                if let Some((time, sel_hash)) =
-                    self.last_selection_hash
-                {
-                    if sel_hash == content_hash
-                        && time.elapsed()
-                            < SELECTION_ECHO_WINDOW
-                    {
-                        tracing::debug!(
-                            "Skipping selection echo \
-                             ({source})"
-                        );
-                        return;
-                    }
-                }
+        if content.len() < 2 {
+            return;
+        }
 
-                if let Some((time, prev_hash)) =
-                    self.last_store_hash
-                {
-                    if prev_hash == content_hash
-                        && time.elapsed()
-                            < std::time::Duration::from_secs(1)
-                    {
-                        tracing::debug!(
-                            "Skipping duplicate store"
-                        );
-                        return;
-                    }
-                }
-                self.last_store_hash =
-                    Some((Instant::now(), content_hash));
-
-                let is_image = mime.starts_with("image/");
-                tracing::info!(
-                    "Store: {} ({} bytes, {source})",
-                    mime,
-                    content.len()
+        let content_hash = hash_content(&content);
+        if let Some(sync_hash) = self.last_sync_hash {
+            if sync_hash == content_hash {
+                self.last_sync_hash = None;
+                tracing::debug!(
+                    "Skipping sync echo ({source})"
                 );
+                return;
+            }
+        }
 
-                let mut image_superseded_text = false;
-                if is_image {
-                    if let Some((time, text_id)) =
-                        self.last_text_store.take()
-                    {
-                        if time.elapsed() < DEDUP_WINDOW {
-                            let db = self.db.clone();
-                            let result = {
-                                let db = db.lock().await;
-                                db.delete(text_id)
-                            };
-                            if let Err(e) = result {
-                                tracing::error!(
-                                    "Failed to delete text \
-                                     dupe: {e}"
-                                );
-                            } else {
-                                tracing::info!(
-                                    "Removed text entry \
-                                     {text_id} (image \
-                                     supersedes)"
-                                );
-                                image_superseded_text = true;
-                            }
-                        }
-                    }
-                }
+        if let Some((time, sel_hash)) =
+            self.last_selection_hash
+        {
+            if sel_hash == content_hash
+                && time.elapsed()
+                    < SELECTION_ECHO_WINDOW
+            {
+                tracing::debug!(
+                    "Skipping selection echo \
+                     ({source})"
+                );
+                return;
+            }
+        }
 
-                let mut data = crate::entry::MimeDataMap::new();
-                data.insert(mime.clone(), content.clone());
-                let db = self.db.clone();
-                let result = {
-                    let db = db.lock().await;
-                    db.insert(data)
-                };
-                match result {
-                    Ok(id) => {
-                        tracing::info!("Inserted entry {id}");
-                        if !is_image {
-                            let is_new = self
-                                .last_text_store
-                                .as_ref()
-                                .map(|(_, prev_id)| *prev_id != id)
-                                .unwrap_or(true);
-                            if is_new {
-                                self.last_text_store =
-                                    Some((Instant::now(), id));
-                            }
-                        }
+        if let Some((time, prev_hash)) =
+            self.last_store_hash
+        {
+            if prev_hash == content_hash
+                && time.elapsed()
+                    < std::time::Duration::from_secs(1)
+            {
+                tracing::debug!(
+                    "Skipping duplicate store"
+                );
+                return;
+            }
+        }
+        self.last_store_hash =
+            Some((Instant::now(), content_hash));
 
-                        if is_image {
-                            self.generate_thumbnail(
-                                id, &content,
-                            );
-                        } else if self
-                            .config
-                            .show_remote_thumbnails
-                        {
-                            self.maybe_fetch_thumbnail(
-                                id, &content,
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to insert: {e}"
-                        );
-                    }
-                }
+        let is_image = mime.starts_with("image/");
+        tracing::info!(
+            "Store: {} ({} bytes, {source})",
+            mime,
+            content.len()
+        );
 
-                let should_sync = self.config.sync_selections
-                    && (!is_image || image_superseded_text);
-                if should_sync {
-                    let target = match source.as_str() {
-                        "primary"
-                        | "primary-debounced" => {
-                            "clipboard"
-                        }
-                        _ => "primary",
+        let mut image_superseded_text = false;
+        if is_image {
+            if let Some((time, text_id)) =
+                self.last_text_store.take()
+            {
+                if time.elapsed() < DEDUP_WINDOW {
+                    let db = self.db.clone();
+                    let result = {
+                        let db = db.lock().await;
+                        db.delete(text_id)
                     };
-                    self.last_sync_hash =
-                        Some(content_hash);
-                    clipboard::sync_to_selection(
-                        target, &content,
-                    )
-                    .await;
-                    tracing::debug!(
-                        "Synced to {target}"
+                    if let Err(e) = result {
+                        tracing::error!(
+                            "Failed to delete text \
+                             dupe: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            "Removed text entry \
+                             {text_id} (image \
+                             supersedes)"
+                        );
+                        image_superseded_text = true;
+                    }
+                }
+            }
+        }
+
+        let mut data = entry::MimeDataMap::new();
+        data.insert(mime.clone(), content.clone());
+        let db = self.db.clone();
+        let result = {
+            let db = db.lock().await;
+            db.insert(data)
+        };
+        match result {
+            Ok(id) => {
+                tracing::info!(
+                    "Inserted entry {id}"
+                );
+                if !is_image {
+                    let is_new = self
+                        .last_text_store
+                        .as_ref()
+                        .map(|(_, prev_id)| {
+                            *prev_id != id
+                        })
+                        .unwrap_or(true);
+                    if is_new {
+                        self.last_text_store =
+                            Some((Instant::now(), id));
+                    }
+                }
+
+                if is_image {
+                    self.generate_thumbnail(
+                        id, &content,
+                    );
+                } else if self
+                    .config
+                    .show_remote_thumbnails
+                {
+                    self.maybe_fetch_thumbnail(
+                        id, &content,
                     );
                 }
             }
-            PopupAction::SelectEntry { id } => {
-                tracing::info!("SelectEntry {id}");
-                let db = self.db.clone();
-                let entry = {
-                    let db = db.lock().await;
-                    let _ = db.touch(id);
-                    db.get_entry(id)
-                };
-                match entry {
-                    Ok(Some(entry)) => {
-                        let hash =
-                            entry.content_hash();
-                        self.last_selection_hash =
-                            Some((Instant::now(), hash));
-                        clipboard::copy_to_clipboard(
-                            &entry,
-                        )
-                        .await;
-                        tracing::info!(
-                            "Copied entry {id}"
-                        );
-                    }
-                    Ok(None) => {
-                        tracing::warn!(
-                            "Entry {id} not found"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to load entry: {e}"
-                        );
-                    }
-                }
-                self.kill_overlay().await;
+            Err(e) => {
+                tracing::error!(
+                    "Failed to insert: {e}"
+                );
             }
         }
+
+        let should_sync = self.config.sync_selections
+            && (!is_image || image_superseded_text);
+        if should_sync {
+            let target = match source.as_str() {
+                "primary" | "primary-debounced" => {
+                    "clipboard"
+                }
+                _ => "primary",
+            };
+            self.last_sync_hash =
+                Some(content_hash);
+            self.clipboard
+                .sync_to_selection(target, &content)
+                .await;
+            tracing::debug!("Synced to {target}");
+        }
+    }
+
+    async fn handle_select_entry(&mut self, id: i64) {
+        tracing::info!("SelectEntry {id}");
+        let db = self.db.clone();
+        let entry = {
+            let db = db.lock().await;
+            let _ = db.touch(id);
+            db.get_entry(id)
+        };
+        match entry {
+            Ok(Some(entry)) => {
+                let hash = entry.content_hash();
+                self.last_selection_hash =
+                    Some((Instant::now(), hash));
+                self.clipboard
+                    .copy_to_clipboard(&entry)
+                    .await;
+                tracing::info!(
+                    "Copied entry {id}"
+                );
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "Entry {id} not found"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load entry: {e}"
+                );
+            }
+        }
+        self.kill_overlay().await;
     }
 
     fn overlay_running(&mut self) -> bool {
@@ -318,9 +341,10 @@ impl Daemon {
     }
 
     fn spawn_overlay(&mut self) {
-        let exe = std::env::current_exe().unwrap_or_else(|_| {
-            std::path::PathBuf::from("clipbro")
-        });
+        let exe =
+            std::env::current_exe().unwrap_or_else(
+                |_| std::path::PathBuf::from("clipbro"),
+            );
 
         match tokio::process::Command::new(&exe)
             .arg("overlay")
@@ -335,13 +359,17 @@ impl Daemon {
                 dbus::set_visible(true);
             }
             Err(e) => {
-                tracing::error!("Failed to spawn overlay: {e}");
+                tracing::error!(
+                    "Failed to spawn overlay: {e}"
+                );
             }
         }
     }
 
     async fn kill_overlay(&mut self) {
-        if let Some(mut child) = self.overlay_child.take() {
+        if let Some(mut child) =
+            self.overlay_child.take()
+        {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
@@ -362,7 +390,8 @@ impl Daemon {
             )
             .await;
 
-            let Some(png_bytes) = result.ok().flatten()
+            let Some(png_bytes) =
+                result.ok().flatten()
             else {
                 return;
             };
@@ -374,7 +403,8 @@ impl Daemon {
                 &png_bytes,
             ) {
                 tracing::error!(
-                    "Failed to store image thumbnail: {e}"
+                    "Failed to store image \
+                     thumbnail: {e}"
                 );
             } else {
                 tracing::debug!(
@@ -391,7 +421,8 @@ impl Daemon {
         entry_id: i64,
         content: &[u8],
     ) {
-        let text = match std::str::from_utf8(content) {
+        let text = match std::str::from_utf8(content)
+        {
             Ok(s) => s.trim(),
             Err(_) => return,
         };
@@ -405,11 +436,14 @@ impl Daemon {
 
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(
-                move || fetch_thumbnail(&url, max_bytes),
+                move || {
+                    fetch_thumbnail(&url, max_bytes)
+                },
             )
             .await;
 
-            let Some(raw) = result.ok().flatten() else {
+            let Some(raw) = result.ok().flatten()
+            else {
                 return;
             };
             let thumb = resize_to_thumbnail(&raw)
@@ -435,24 +469,27 @@ impl Daemon {
     }
 
     fn spawn_clipboard_watchers(&mut self) {
-        let exe = std::env::current_exe().unwrap_or_else(|_| {
-            std::path::PathBuf::from("clipbro")
-        });
-        let exe_str = exe.to_str().unwrap_or("clipbro");
+        let exe =
+            std::env::current_exe().unwrap_or_else(
+                |_| std::path::PathBuf::from("clipbro"),
+            );
+        let exe_str =
+            exe.to_str().unwrap_or("clipbro");
 
-        let text = tokio::process::Command::new("wl-paste")
-            .args([
-                "--no-newline",
-                "--watch",
-                exe_str,
-                "store",
-                "--mime",
-                "text/plain",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let text =
+            tokio::process::Command::new("wl-paste")
+                .args([
+                    "--no-newline",
+                    "--watch",
+                    exe_str,
+                    "store",
+                    "--mime",
+                    "text/plain",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
 
         match text {
             Ok(child) => {
@@ -462,54 +499,63 @@ impl Daemon {
                 );
                 self.watcher_children.push(child);
             }
-            Err(e) => tracing::error!("Text watcher failed: {e}"),
+            Err(e) => {
+                tracing::error!(
+                    "Text watcher failed: {e}"
+                )
+            }
         }
 
-        let primary = tokio::process::Command::new("wl-paste")
-            .args([
-                "--no-newline",
-                "--primary",
-                "--watch",
-                exe_str,
-                "store",
-                "--mime",
-                "text/plain",
-                "--source",
-                "primary",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let primary =
+            tokio::process::Command::new("wl-paste")
+                .args([
+                    "--no-newline",
+                    "--primary",
+                    "--watch",
+                    exe_str,
+                    "store",
+                    "--mime",
+                    "text/plain",
+                    "--source",
+                    "primary",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
 
         match primary {
             Ok(child) => {
                 tracing::info!(
-                    "Primary watcher started (PID {})",
+                    "Primary watcher started \
+                     (PID {})",
                     child.id().unwrap_or(0)
                 );
                 self.watcher_children.push(child);
             }
             Err(e) => {
-                tracing::error!("Primary watcher failed: {e}")
+                tracing::error!(
+                    "Primary watcher failed: {e}"
+                )
             }
         }
 
-        let image = tokio::process::Command::new("wl-paste")
-            .args([
-                "--no-newline",
-                "--type",
-                "image",
-                "--watch",
-                exe_str,
-                "store",
-                "--mime",
-                "image",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let image =
+            tokio::process::Command::new("wl-paste")
+                .args([
+                    "--no-newline",
+                    "--type",
+                    "image",
+                    "--watch",
+                    exe_str,
+                    "store",
+                    "--mime",
+                    "image",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
 
         match image {
             Ok(child) => {
@@ -519,13 +565,19 @@ impl Daemon {
                 );
                 self.watcher_children.push(child);
             }
-            Err(e) => tracing::error!("Image watcher failed: {e}"),
+            Err(e) => {
+                tracing::error!(
+                    "Image watcher failed: {e}"
+                )
+            }
         }
     }
 
     async fn shutdown(&mut self) {
         self.kill_overlay().await;
-        for mut child in self.watcher_children.drain(..) {
+        for mut child in
+            self.watcher_children.drain(..)
+        {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
@@ -533,7 +585,9 @@ impl Daemon {
     }
 }
 
-fn resize_to_thumbnail(data: &[u8]) -> Option<Vec<u8>> {
+fn resize_to_thumbnail(
+    data: &[u8],
+) -> Option<Vec<u8>> {
     let img = image::load_from_memory(data).ok()?;
     let thumb = img.thumbnail(256, 256);
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -561,7 +615,8 @@ fn fetch_thumbnail(
         .unwrap_or("");
     if !content_type.starts_with("image/") {
         tracing::debug!(
-            "Remote URL is not an image: {content_type}"
+            "Remote URL is not an image: \
+             {content_type}"
         );
         return None;
     }
@@ -605,6 +660,45 @@ fn hash_content(data: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::MockClipboardService;
+    use crate::entry::EntryType;
+
+    fn test_db() -> Database {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db =
+            Database::open(&path, false).unwrap();
+        std::mem::forget(dir);
+        db
+    }
+
+    fn test_config() -> Config {
+        Config {
+            sync_selections: true,
+            ..Config::default()
+        }
+    }
+
+    fn test_daemon(
+        mock: MockClipboardService,
+    ) -> Daemon<MockClipboardService> {
+        dbus::init_visible();
+        Daemon::new(test_db(), test_config(), mock)
+    }
+
+    fn store_action(
+        mime: &str,
+        content: &[u8],
+        source: &str,
+    ) -> PopupAction {
+        PopupAction::Store {
+            mime: mime.into(),
+            content: content.to_vec(),
+            source: source.into(),
+        }
+    }
+
+    // -- Unit tests for pure functions --
 
     #[test]
     fn hash_content_deterministic() {
@@ -625,9 +719,9 @@ mod tests {
 
     #[test]
     fn resize_to_thumbnail_valid_png() {
-        let img =
-            image::RgbaImage::new(512, 512);
-        let mut buf = std::io::Cursor::new(Vec::new());
+        let img = image::RgbaImage::new(512, 512);
+        let mut buf =
+            std::io::Cursor::new(Vec::new());
         img.write_to(
             &mut buf,
             image::ImageFormat::Png,
@@ -653,6 +747,297 @@ mod tests {
                 .is_none()
         );
     }
+
+    // -- Integration tests with mocked clipboard --
+
+    #[tokio::test]
+    async fn store_text_inserts_entry() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .returning(|_, _| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"hello world",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        let entries =
+            db.list_entries(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].text_content(),
+            Some("hello world"),
+        );
+    }
+
+    #[tokio::test]
+    async fn store_skips_tiny_content() {
+        let mock = MockClipboardService::new();
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"x",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        let entries =
+            db.list_entries(10).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn store_syncs_clipboard_to_primary() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .withf(|target, _| target == "primary")
+            .times(1)
+            .returning(|_, _| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"sync me",
+                "clipboard",
+            ))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn store_syncs_primary_to_clipboard() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .withf(|target, _| {
+                target == "clipboard"
+            })
+            .times(1)
+            .returning(|_, _| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"sync me back",
+                "primary-debounced",
+            ))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn store_skips_sync_echo() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .times(0);
+        let mut daemon = test_daemon(mock);
+
+        let content = b"echo content";
+        daemon.last_sync_hash =
+            Some(hash_content(content));
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                content,
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        assert!(db.list_entries(10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn store_image_supersedes_text() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .returning(|_, _| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"will be superseded",
+                "clipboard",
+            ))
+            .await;
+
+        let text_id = {
+            let db = daemon.db.lock().await;
+            let entries =
+                db.list_entries(10).unwrap();
+            assert_eq!(entries.len(), 1);
+            entries[0].id
+        };
+
+        daemon
+            .handle_action(store_action(
+                "image/png",
+                b"fake image data bytes",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        assert!(
+            db.get_entry(text_id)
+                .unwrap()
+                .is_none(),
+            "text entry should be deleted",
+        );
+        let entries = db.list_entries(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].entry_type,
+            EntryType::Image,
+        );
+    }
+
+    #[tokio::test]
+    async fn store_no_sync_when_disabled() {
+        let mock = MockClipboardService::new();
+        dbus::init_visible();
+        let config = Config {
+            sync_selections: false,
+            ..Config::default()
+        };
+        let mut daemon = Daemon::new(
+            test_db(),
+            config,
+            mock,
+        );
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"no sync",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        assert_eq!(
+            db.list_entries(10).unwrap().len(),
+            1,
+        );
+    }
+
+    #[tokio::test]
+    async fn select_entry_copies_to_clipboard() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .returning(|_, _| Box::pin(async {}));
+        mock.expect_copy_to_clipboard()
+            .times(1)
+            .returning(|_| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"select this",
+                "clipboard",
+            ))
+            .await;
+
+        let id = {
+            let db = daemon.db.lock().await;
+            db.list_entries(10).unwrap()[0].id
+        };
+
+        daemon
+            .handle_action(
+                PopupAction::SelectEntry { id },
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn clear_removes_non_favorites() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .returning(|_, _| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"keeper entry",
+                "clipboard",
+            ))
+            .await;
+
+        let fav_id = {
+            let db = daemon.db.lock().await;
+            let entries =
+                db.list_entries(10).unwrap();
+            let id = entries[0].id;
+            db.toggle_favorite(id).unwrap();
+            id
+        };
+
+        std::thread::sleep(
+            std::time::Duration::from_millis(5),
+        );
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"disposable entry",
+                "clipboard",
+            ))
+            .await;
+
+        daemon
+            .handle_action(PopupAction::Clear)
+            .await;
+
+        let db = daemon.db.lock().await;
+        let entries = db.list_entries(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, fav_id);
+        assert!(entries[0].favorite);
+    }
+
+    #[tokio::test]
+    async fn store_dedup_skips_rapid_duplicate() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .returning(|_, _| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"duplicate me",
+                "clipboard",
+            ))
+            .await;
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"duplicate me",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        let entries = db.list_entries(10).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "rapid duplicate should be skipped",
+        );
+    }
 }
 
 pub async fn run(db: Database, config: Config) {
@@ -663,7 +1048,9 @@ pub async fn run(db: Database, config: Config) {
     let conn = match dbus::serve(tx.clone()).await {
         Ok(conn) => conn,
         Err(e) => {
-            tracing::error!("D-Bus registration failed: {e}");
+            tracing::error!(
+                "D-Bus registration failed: {e}"
+            );
             std::process::exit(1);
         }
     };
@@ -672,11 +1059,15 @@ pub async fn run(db: Database, config: Config) {
         "sync_selections = {}",
         config.sync_selections
     );
-    let mut daemon = Daemon::new(db, config);
+    let clipboard = crate::clipboard::WaylandClipboard;
+    let mut daemon =
+        Daemon::new(db, config, clipboard);
     daemon.action_tx = Some(tx.clone());
     daemon.spawn_clipboard_watchers();
 
-    tracing::info!("Daemon running (no Wayland connection)");
+    tracing::info!(
+        "Daemon running (no Wayland connection)"
+    );
 
     while let Some(action) = rx.recv().await {
         daemon.handle_action(action).await;

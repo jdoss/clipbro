@@ -43,4 +43,5 @@ default-features = false
 features = ["tokio", "wayland", "winit"]
 
 [dev-dependencies]
+mockall = "0.14.0"
 tempfile = "3.27.0"
