@@ -8,8 +8,7 @@ use cosmic::iced::{
 };
 use cosmic::iced::widget::{
     button, column, container, image as iced_image,
-    rich_text, row, scrollable, text, text_input, Column,
-    Row,
+    rich_text, scrollable, text, text_input, Column, Row,
 };
 use cosmic::iced::alignment;
 use cosmic::iced_runtime::core::layout::Limits;
@@ -32,6 +31,7 @@ const BAR_THICKNESS: u32 = 400;
 const SIDEBAR_WIDTH: u32 = 320;
 
 const SCROLLABLE_ID: &str = "clipbro-cards";
+const SEARCH_ID: &str = "clipbro-search";
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -39,6 +39,8 @@ enum Message {
     SelectEntry(i64),
     NavForward,
     NavBackward,
+    CharTyped(String),
+    Backspace,
     Dismiss,
     Unfocused,
     SelectionSent,
@@ -148,6 +150,14 @@ impl Overlay {
                 self.search_query = query;
                 self.focused_index = 0;
             }
+            Message::CharTyped(c) => {
+                self.search_query.push_str(&c);
+                self.focused_index = 0;
+            }
+            Message::Backspace => {
+                self.search_query.pop();
+                self.focused_index = 0;
+            }
             Message::SelectEntry(id) => {
                 return Task::perform(
                     async move {
@@ -243,6 +253,7 @@ impl Overlay {
         let search =
             text_input("Search...", &self.search_query)
                 .on_input(Message::SearchChanged)
+                .id(iced::widget::Id::new(SEARCH_ID))
                 .padding(10);
 
         let filtered = self.filtered_entries();
@@ -306,31 +317,19 @@ impl Overlay {
                 }
             };
 
-        let search_widget: Element<'_, Message> =
-            if self.horizontal {
-                container(search)
-                    .width(Length::Fixed(250.0))
-                    .into()
-            } else {
-                container(search)
-                    .width(Length::Fill)
-                    .into()
-            };
+        let search_widget = container(search)
+            .width(Length::Fixed(300.0))
+            .center_x(Length::Fill);
 
-        let layout: Element<'_, Message> =
-            if self.horizontal {
-                row![search_widget, cards_widget]
-                    .spacing(8)
-                    .padding(12)
-                    .height(Length::Fill)
-                    .into()
-            } else {
-                column![search_widget, cards_widget]
-                    .spacing(8)
-                    .padding(12)
-                    .width(Length::Fill)
-                    .into()
-            };
+        let layout: Element<'_, Message> = column![
+            search_widget,
+            cards_widget,
+        ]
+        .spacing(8)
+        .padding(12)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
 
         container(layout)
             .width(Length::Fill)
@@ -356,15 +355,38 @@ impl Overlay {
             return self.entries.iter().collect();
         }
 
-        let query = self.search_query.to_lowercase();
+        let terms: Vec<String> = self
+            .search_query
+            .to_lowercase()
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+
         self.entries
             .iter()
             .filter(|e| {
-                e.text_content()
-                    .map(|t| {
-                        t.to_lowercase().contains(&query)
-                    })
-                    .unwrap_or(false)
+                let text_lower = e
+                    .text_content()
+                    .map(|t| t.to_lowercase())
+                    .unwrap_or_default();
+                let type_lower = self
+                    .highlights
+                    .get(&e.id)
+                    .map(|hl| hl.language.to_lowercase())
+                    .unwrap_or_default();
+                let entry_type = match &e.entry_type {
+                    crate::entry::EntryType::Image => {
+                        "image"
+                    }
+                    crate::entry::EntryType::Url => "url",
+                    crate::entry::EntryType::Text => "",
+                };
+
+                terms.iter().all(|term| {
+                    text_lower.contains(term)
+                        || type_lower.contains(term)
+                        || entry_type.contains(term)
+                })
             })
             .collect()
     }
@@ -731,26 +753,34 @@ fn input_subscription() -> Subscription<Message> {
                     key, ..
                 },
             ) => {
-                if let iced::keyboard::Key::Named(named) =
-                    key
-                {
-                    use iced::keyboard::key::Named;
-                    match named {
-                        Named::Escape | Named::Enter => {
-                            Some(Message::Dismiss)
+                match key {
+                    iced::keyboard::Key::Named(named) => {
+                        use iced::keyboard::key::Named;
+                        match named {
+                            Named::Escape
+                            | Named::Enter => {
+                                Some(Message::Dismiss)
+                            }
+                            Named::ArrowRight
+                            | Named::ArrowDown => {
+                                Some(Message::NavForward)
+                            }
+                            Named::ArrowLeft
+                            | Named::ArrowUp => {
+                                Some(Message::NavBackward)
+                            }
+                            Named::Backspace => {
+                                Some(Message::Backspace)
+                            }
+                            _ => None,
                         }
-                        Named::ArrowRight
-                        | Named::ArrowDown => {
-                            Some(Message::NavForward)
-                        }
-                        Named::ArrowLeft
-                        | Named::ArrowUp => {
-                            Some(Message::NavBackward)
-                        }
-                        _ => None,
                     }
-                } else {
-                    None
+                    iced::keyboard::Key::Character(c) => {
+                        Some(Message::CharTyped(
+                            c.to_string(),
+                        ))
+                    }
+                    _ => None,
                 }
             }
             iced::Event::PlatformSpecific(
