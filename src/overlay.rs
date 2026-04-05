@@ -2,10 +2,14 @@ use std::collections::HashMap;
 
 use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::window;
-use cosmic::iced::{self, ContentFit, Element, Length, Subscription, Task};
+use cosmic::iced::{
+    self, Color, ContentFit, Element, Length, Subscription,
+    Task,
+};
 use cosmic::iced::widget::{
-    button, column, container, image as iced_image, row,
-    scrollable, text, text_input, Column, Row,
+    button, column, container, image as iced_image,
+    rich_text, row, scrollable, text, text_input, Column,
+    Row,
 };
 use cosmic::iced::alignment;
 use cosmic::iced_runtime::core::layout::Limits;
@@ -21,11 +25,13 @@ use crate::entry::Entry;
 
 const CARD_WIDTH: f32 = 340.0;
 const CARD_HEIGHT_VERT: f32 = 200.0;
-const CARD_PADDING: u16 = 4;
+const CARD_PADDING: u16 = 8;
 const CARD_SPACING: u16 = 8;
 
 const BAR_THICKNESS: u32 = 400;
 const SIDEBAR_WIDTH: u32 = 320;
+
+const SCROLLABLE_ID: &str = "clipbro-cards";
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -38,13 +44,21 @@ enum Message {
     SelectionSent,
 }
 
+struct HighlightedText {
+    language: String,
+    spans: Vec<(Color, String)>,
+}
+
 struct Overlay {
     entries: Vec<Entry>,
     search_query: String,
     focused_index: usize,
     active_entry_id: Option<i64>,
     handles: HashMap<i64, iced_image::Handle>,
+    highlights: HashMap<i64, HighlightedText>,
     horizontal: bool,
+    #[allow(dead_code)] // used during init for highlights
+    is_dark: bool,
 }
 
 impl Overlay {
@@ -85,13 +99,20 @@ impl Overlay {
             "top" | "bottom"
         );
 
+        let is_dark = detect_cosmic_theme()
+            == iced::Theme::Dark;
+        let highlights =
+            build_highlights(&entries, is_dark);
+
         let overlay = Self {
             entries,
             search_query: String::new(),
             focused_index: 0,
             active_entry_id,
             handles,
+            highlights,
             horizontal,
+            is_dark,
         };
 
         let id = window::Id::unique();
@@ -158,6 +179,7 @@ impl Overlay {
                     self.focused_index =
                         (self.focused_index + 1)
                             % filtered.len();
+                    return self.scroll_to_focused();
                 }
             }
             Message::NavBackward => {
@@ -168,10 +190,35 @@ impl Overlay {
                             + filtered.len()
                             - 1)
                             % filtered.len();
+                    return self.scroll_to_focused();
                 }
             }
         }
         Task::none()
+    }
+
+    fn scroll_to_focused(&self) -> Task<Message> {
+        let count = self.filtered_entries().len();
+        if count <= 1 {
+            return Task::none();
+        }
+        let ratio = self.focused_index as f32
+            / (count - 1) as f32;
+        let offset = if self.horizontal {
+            scrollable::RelativeOffset {
+                x: Some(ratio),
+                y: None,
+            }
+        } else {
+            scrollable::RelativeOffset {
+                x: None,
+                y: Some(ratio),
+            }
+        };
+        scrollable::snap_to(
+            iced::widget::Id::new(SCROLLABLE_ID),
+            offset,
+        )
     }
 
     fn select_focused_and_exit(&self) -> Task<Message> {
@@ -219,16 +266,25 @@ impl Overlay {
                                     == Some(entry.id),
                                 self.handles
                                     .get(&entry.id),
+                                self.highlights
+                                    .get(&entry.id),
                                 self.horizontal,
                             )
                         })
                         .collect();
 
+                let sid = iced::widget::Id::new(
+                    SCROLLABLE_ID,
+                );
                 if self.horizontal {
                     scrollable(
-                        Row::with_children(cards)
-                            .spacing(CARD_SPACING),
+                        container(
+                            Row::with_children(cards)
+                                .spacing(CARD_SPACING),
+                        )
+                        .padding([0, 0, 16, 0]),
                     )
+                    .id(sid)
                     .direction(
                         scrollable::Direction::Horizontal(
                             scrollable::Scrollbar::new(),
@@ -238,9 +294,13 @@ impl Overlay {
                     .into()
                 } else {
                     scrollable(
-                        Column::with_children(cards)
-                            .spacing(CARD_SPACING),
+                        container(
+                            Column::with_children(cards)
+                                .spacing(CARD_SPACING),
+                        )
+                        .padding([0, 16, 0, 0]),
                     )
+                    .id(sid)
                     .height(Length::Fill)
                     .into()
                 }
@@ -342,6 +402,43 @@ fn position_settings(
     }
 }
 
+fn build_highlights(
+    entries: &[Entry],
+    is_dark: bool,
+) -> HashMap<i64, HighlightedText> {
+    let mut map = HashMap::new();
+    for entry in entries {
+        if entry.entry_type
+            != crate::entry::EntryType::Text
+        {
+            continue;
+        }
+        let Some(content) = entry.text_content() else {
+            continue;
+        };
+        let truncated: String =
+            content.chars().take(500).collect();
+        let (language, raw_spans) =
+            crate::entry::highlight_text(
+                &truncated, is_dark,
+            );
+        let spans = raw_spans
+            .into_iter()
+            .map(|([r, g, b, a], s)| {
+                (
+                    Color::from_rgba8(r, g, b, f32::from(a) / 255.0),
+                    s,
+                )
+            })
+            .collect();
+        map.insert(
+            entry.id,
+            HighlightedText { language, spans },
+        );
+    }
+    map
+}
+
 fn build_handles(
     entries: &[Entry],
     show_thumbnails: bool,
@@ -377,6 +474,7 @@ fn entry_card<'a>(
     focused: bool,
     active: bool,
     handle: Option<&iced_image::Handle>,
+    highlight: Option<&'a HighlightedText>,
     horizontal: bool,
 ) -> Element<'a, Message> {
     use crate::entry::{EntryType, is_image_url};
@@ -429,36 +527,83 @@ fn entry_card<'a>(
                         .width(Length::Fill)
                         .height(Length::FillPortion(3)),
                     text(format!("{emoji}{url}"))
-                        .size(12)
+                        .size(11)
                         .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                    text("Image URL")
+                        .size(11)
+                        .width(Length::Fill),
+                ]
+                .spacing(2)
+                .into()
+            } else {
+                column![
+                    text(format!("{emoji}{url}"))
+                        .size(13)
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    text("URL")
+                        .size(11)
+                        .width(Length::Fill),
+                ]
+                .spacing(4)
+                .into()
+            }
+        }
+        EntryType::Text => {
+            if let Some(hl) = highlight {
+                let is_code =
+                    hl.language != "Plain Text";
+                let font_size =
+                    if is_code { 12 } else { 14 };
+                let spans: Vec<
+                    iced::widget::text::Span<
+                        '_,
+                        (),
+                        iced::Font,
+                    >,
+                > = hl
+                    .spans
+                    .iter()
+                    .map(|(color, s)| {
+                        iced::widget::text::Span::new(
+                            s.as_str(),
+                        )
+                        .color(*color)
+                        .size(font_size)
+                    })
+                    .collect();
+                column![
+                    rich_text(spans)
+                        .wrapping(Wrapping::Word)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    text(&hl.language)
+                        .size(11)
                         .width(Length::Fill),
                 ]
                 .spacing(4)
                 .into()
             } else {
-                container(
-                    text(format!("{emoji}{url}"))
-                        .size(13)
-                        .wrapping(Wrapping::WordOrGlyph)
+                let content = entry
+                    .text_content()
+                    .unwrap_or("[empty]");
+                let truncated: String =
+                    content.chars().take(500).collect();
+                column![
+                    text(truncated)
+                        .size(14)
+                        .wrapping(Wrapping::Word)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    text("Text")
+                        .size(11)
                         .width(Length::Fill),
-                )
-                .padding(4)
+                ]
+                .spacing(4)
                 .into()
             }
-        }
-        EntryType::Text => {
-            let content =
-                entry.text_content().unwrap_or("[empty]");
-            let truncated: String =
-                content.chars().take(200).collect();
-            container(
-                text(truncated)
-                    .size(13)
-                    .wrapping(Wrapping::Word)
-                    .width(Length::Fill),
-            )
-            .padding(4)
-            .into()
         }
     };
 

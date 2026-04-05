@@ -17,6 +17,9 @@ const DEDUP_WINDOW: std::time::Duration =
 const SELECTION_ECHO_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(3);
 
+const PRIMARY_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(300);
+
 struct Daemon {
     db: Arc<Mutex<Database>>,
     config: Config,
@@ -26,6 +29,10 @@ struct Daemon {
     last_sync_hash: Option<u64>,
     last_store_hash: Option<(Instant, u64)>,
     last_selection_hash: Option<(Instant, u64)>,
+    primary_debounce:
+        Option<tokio::task::JoinHandle<()>>,
+    action_tx:
+        Option<mpsc::UnboundedSender<PopupAction>>,
 }
 
 impl Daemon {
@@ -39,6 +46,8 @@ impl Daemon {
             last_sync_hash: None,
             last_store_hash: None,
             last_selection_hash: None,
+            primary_debounce: None,
+            action_tx: None,
         }
     }
 
@@ -69,7 +78,43 @@ impl Daemon {
                     tracing::error!("Failed to clear: {e}");
                 }
             }
-            PopupAction::Store { mime, content, source } => {
+            PopupAction::Store {
+                mime,
+                content,
+                source,
+            } => {
+                if source == "primary" {
+                    if let Some(h) =
+                        self.primary_debounce.take()
+                    {
+                        h.abort();
+                    }
+                    if let Some(tx) = &self.action_tx {
+                        let tx = tx.clone();
+                        let m = mime.clone();
+                        let c = content.clone();
+                        self.primary_debounce =
+                            Some(tokio::spawn(
+                                async move {
+                                    tokio::time::sleep(
+                                        PRIMARY_DEBOUNCE,
+                                    )
+                                    .await;
+                                    let _ = tx.send(
+                                        PopupAction::Store {
+                                            mime: m,
+                                            content: c,
+                                            source:
+                                                "primary-debounced"
+                                                    .into(),
+                                        },
+                                    );
+                                },
+                            ));
+                        return;
+                    }
+                }
+
                 if content.len() < 2 {
                     return;
                 }
@@ -197,7 +242,10 @@ impl Daemon {
                     && (!is_image || image_superseded_text);
                 if should_sync {
                     let target = match source.as_str() {
-                        "primary" => "clipboard",
+                        "primary"
+                        | "primary-debounced" => {
+                            "clipboard"
+                        }
                         _ => "primary",
                     };
                     self.last_sync_hash =
@@ -559,7 +607,7 @@ pub async fn run(db: Database, config: Config) {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let conn = match dbus::serve(tx).await {
+    let conn = match dbus::serve(tx.clone()).await {
         Ok(conn) => conn,
         Err(e) => {
             tracing::error!("D-Bus registration failed: {e}");
@@ -572,6 +620,7 @@ pub async fn run(db: Database, config: Config) {
         config.sync_selections
     );
     let mut daemon = Daemon::new(db, config);
+    daemon.action_tx = Some(tx.clone());
     daemon.spawn_clipboard_watchers();
 
     tracing::info!("Daemon running (no Wayland connection)");
