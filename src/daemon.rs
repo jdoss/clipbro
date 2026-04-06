@@ -20,13 +20,30 @@ const SELECTION_ECHO_WINDOW: std::time::Duration =
 const PRIMARY_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(300);
 
+const WATCHER_CHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WatcherKind {
+    Text,
+    Primary,
+    Image,
+}
+
+const ALL_WATCHERS: [WatcherKind; 3] = [
+    WatcherKind::Text,
+    WatcherKind::Primary,
+    WatcherKind::Image,
+];
+
 struct Daemon<C: ClipboardService> {
     db: Arc<Mutex<Database>>,
     config: Config,
     clipboard: C,
     paused: bool,
     overlay_child: Option<tokio::process::Child>,
-    watcher_children: Vec<tokio::process::Child>,
+    watcher_children:
+        Vec<(WatcherKind, tokio::process::Child)>,
     last_text_store: Option<(Instant, i64)>,
     last_sync_hash: Option<u64>,
     last_store_hash: Option<(Instant, u64)>,
@@ -489,114 +506,143 @@ impl<C: ClipboardService> Daemon<C> {
         });
     }
 
+    fn spawn_watcher(
+        exe_str: &str,
+        kind: WatcherKind,
+    ) -> Option<tokio::process::Child> {
+        let args: Vec<&str> = match kind {
+            WatcherKind::Text => vec![
+                "--no-newline",
+                "--watch",
+                exe_str,
+                "store",
+                "--mime",
+                "text/plain",
+            ],
+            WatcherKind::Primary => vec![
+                "--no-newline",
+                "--primary",
+                "--watch",
+                exe_str,
+                "store",
+                "--mime",
+                "text/plain",
+                "--source",
+                "primary",
+            ],
+            WatcherKind::Image => vec![
+                "--no-newline",
+                "--type",
+                "image",
+                "--watch",
+                exe_str,
+                "store",
+                "--mime",
+                "image",
+            ],
+        };
+
+        match tokio::process::Command::new("wl-paste")
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                tracing::info!(
+                    "{kind:?} watcher started \
+                     (PID {})",
+                    child.id().unwrap_or(0)
+                );
+                Some(child)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "{kind:?} watcher spawn failed: {e}"
+                );
+                None
+            }
+        }
+    }
+
     fn spawn_clipboard_watchers(&mut self) {
         let exe =
             std::env::current_exe().unwrap_or_else(
                 |_| std::path::PathBuf::from("clipbro"),
             );
-        let exe_str =
-            exe.to_str().unwrap_or("clipbro");
+        let exe_str = exe
+            .to_str()
+            .unwrap_or("clipbro")
+            .to_string();
 
-        let text =
-            tokio::process::Command::new("wl-paste")
-                .args([
-                    "--no-newline",
-                    "--watch",
-                    exe_str,
-                    "store",
-                    "--mime",
-                    "text/plain",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-
-        match text {
-            Ok(child) => {
-                tracing::info!(
-                    "Text watcher started (PID {})",
-                    child.id().unwrap_or(0)
-                );
-                self.watcher_children.push(child);
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Text watcher failed: {e}"
-                )
-            }
-        }
-
-        let primary =
-            tokio::process::Command::new("wl-paste")
-                .args([
-                    "--no-newline",
-                    "--primary",
-                    "--watch",
-                    exe_str,
-                    "store",
-                    "--mime",
-                    "text/plain",
-                    "--source",
-                    "primary",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-
-        match primary {
-            Ok(child) => {
-                tracing::info!(
-                    "Primary watcher started \
-                     (PID {})",
-                    child.id().unwrap_or(0)
-                );
-                self.watcher_children.push(child);
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Primary watcher failed: {e}"
-                )
-            }
-        }
-
-        let image =
-            tokio::process::Command::new("wl-paste")
-                .args([
-                    "--no-newline",
-                    "--type",
-                    "image",
-                    "--watch",
-                    exe_str,
-                    "store",
-                    "--mime",
-                    "image",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-
-        match image {
-            Ok(child) => {
-                tracing::info!(
-                    "Image watcher started (PID {})",
-                    child.id().unwrap_or(0)
-                );
-                self.watcher_children.push(child);
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Image watcher failed: {e}"
-                )
+        for &kind in &ALL_WATCHERS {
+            if let Some(child) =
+                Self::spawn_watcher(&exe_str, kind)
+            {
+                self.watcher_children
+                    .push((kind, child));
             }
         }
     }
 
+    /// Reap any wl-paste watcher that has exited
+    /// (typically because the Wayland socket went
+    /// away on logout) and respawn it so the daemon
+    /// keeps capturing across sessions.
+    fn check_watchers(&mut self) {
+        let exe =
+            std::env::current_exe().unwrap_or_else(
+                |_| std::path::PathBuf::from("clipbro"),
+            );
+        let exe_str = exe
+            .to_str()
+            .unwrap_or("clipbro")
+            .to_string();
+
+        let mut alive = Vec::with_capacity(
+            self.watcher_children.len(),
+        );
+        for (kind, mut child) in
+            self.watcher_children.drain(..)
+        {
+            match child.try_wait() {
+                Ok(None) => alive.push((kind, child)),
+                Ok(Some(status)) => {
+                    tracing::warn!(
+                        "{kind:?} watcher exited \
+                         ({status}); respawning"
+                    );
+                    if let Some(new_child) =
+                        Self::spawn_watcher(
+                            &exe_str, kind,
+                        )
+                    {
+                        alive.push((kind, new_child));
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "{kind:?} watcher try_wait \
+                         failed: {e}; respawning"
+                    );
+                    let _ = child.start_kill();
+                    if let Some(new_child) =
+                        Self::spawn_watcher(
+                            &exe_str, kind,
+                        )
+                    {
+                        alive.push((kind, new_child));
+                    }
+                }
+            }
+        }
+        self.watcher_children = alive;
+    }
+
     async fn shutdown(&mut self) {
         self.kill_overlay().await;
-        for mut child in
+        for (_, mut child) in
             self.watcher_children.drain(..)
         {
             let _ = child.kill().await;
@@ -1208,8 +1254,29 @@ pub async fn run(db: Database, config: Config) {
         "Daemon running (no Wayland connection)"
     );
 
-    while let Some(action) = rx.recv().await {
-        daemon.handle_action(action).await;
+    let mut watcher_check = tokio::time::interval(
+        WATCHER_CHECK_INTERVAL,
+    );
+    watcher_check.set_missed_tick_behavior(
+        tokio::time::MissedTickBehavior::Skip,
+    );
+
+    loop {
+        tokio::select! {
+            action = rx.recv() => {
+                match action {
+                    Some(action) => {
+                        daemon
+                            .handle_action(action)
+                            .await;
+                    }
+                    None => break,
+                }
+            }
+            _ = watcher_check.tick() => {
+                daemon.check_watchers();
+            }
+        }
     }
 
     daemon.shutdown().await;

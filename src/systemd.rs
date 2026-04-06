@@ -25,6 +25,7 @@ fn unit_contents() -> String {
 [Unit]
 Description=Clipbro clipboard manager
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
