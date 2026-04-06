@@ -45,6 +45,7 @@ struct Daemon<C: ClipboardService> {
     watcher_children:
         Vec<(WatcherKind, tokio::process::Child)>,
     last_text_store: Option<(Instant, i64)>,
+    last_image_store: Option<Instant>,
     last_sync_hash: Option<u64>,
     last_store_hash: Option<(Instant, u64)>,
     last_selection_hash: Option<(Instant, u64)>,
@@ -68,6 +69,7 @@ impl<C: ClipboardService> Daemon<C> {
             overlay_child: None,
             watcher_children: Vec::new(),
             last_text_store: None,
+            last_image_store: None,
             last_sync_hash: None,
             last_store_hash: None,
             last_selection_hash: None,
@@ -226,6 +228,20 @@ impl<C: ClipboardService> Daemon<C> {
             Some((Instant::now(), content_hash));
 
         let is_image = mime.starts_with("image/");
+
+        if !is_image {
+            if let Some(time) = self.last_image_store {
+                if time.elapsed() < DEDUP_WINDOW {
+                    tracing::info!(
+                        "Skipping text store \
+                         ({source}); image was just \
+                         stored (likely placeholder)"
+                    );
+                    return;
+                }
+            }
+        }
+
         tracing::info!(
             "Store: {} ({} bytes, {source})",
             mime,
@@ -234,6 +250,8 @@ impl<C: ClipboardService> Daemon<C> {
 
         let mut image_superseded_text = false;
         if is_image {
+            self.last_image_store =
+                Some(Instant::now());
             if let Some((time, text_id)) =
                 self.last_text_store.take()
             {
@@ -1129,6 +1147,43 @@ mod tests {
         assert!(
             db.list_entries(10).unwrap().is_empty(),
             "selection echo should be skipped",
+        );
+    }
+
+    #[tokio::test]
+    async fn text_after_image_is_dropped() {
+        let mut mock = MockClipboardService::new();
+        mock.expect_sync_to_selection()
+            .returning(|_, _| Box::pin(async {}));
+        let mut daemon = test_daemon(mock);
+
+        daemon
+            .handle_action(store_action(
+                "image/png",
+                b"fake image bytes here",
+                "clipboard",
+            ))
+            .await;
+
+        daemon
+            .handle_action(store_action(
+                "text/plain",
+                b"[image]",
+                "clipboard",
+            ))
+            .await;
+
+        let db = daemon.db.lock().await;
+        let entries = db.list_entries(10).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "text placeholder after image should be \
+             dropped",
+        );
+        assert_eq!(
+            entries[0].entry_type,
+            EntryType::Image,
         );
     }
 
