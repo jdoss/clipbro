@@ -239,7 +239,22 @@ fn run_store(mime: String, source: String) {
         return;
     }
 
-    let mime = detect_mime(&mime, &content);
+    let (mime, offset) =
+        match detect_mime(&mime, &content) {
+            Some(m) => m,
+            None => {
+                eprintln!(
+                    "clipbro store: dropping {} bytes \
+                     with image hint but no recognized \
+                     image signature",
+                    content.len()
+                );
+                return;
+            }
+        };
+    if offset > 0 {
+        content.drain(..offset);
+    }
 
     let conn = match zbus::blocking::Connection::session() {
         Ok(c) => c,
@@ -254,25 +269,48 @@ fn run_store(mime: String, source: String) {
     );
 }
 
-fn detect_mime(hint: &str, data: &[u8]) -> String {
+/// Image-format magic bytes scanned for at the start of
+/// clipboard payloads. Chromium prepends an opaque token
+/// (e.g. 4 bytes) to image content on Wayland, so we
+/// scan a small window rather than only checking offset
+/// 0. The data before the signature is stripped before
+/// storage so other apps receive a clean image.
+const IMAGE_PREFIX_SCAN: usize = 16;
+
+fn detect_mime(
+    hint: &str,
+    data: &[u8],
+) -> Option<(String, usize)> {
     if hint != "image" {
-        return hint.to_string();
+        return Some((hint.to_string(), 0));
     }
-    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        "image/png".to_string()
-    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg".to_string()
-    } else if data.starts_with(b"GIF8") {
-        "image/gif".to_string()
-    } else if data.starts_with(b"RIFF")
-        && data.len() > 12
-        && &data[8..12] == b"WEBP"
+    if data.starts_with(b"BM") {
+        return Some(("image/bmp".to_string(), 0));
+    }
+    let max = data.len().min(IMAGE_PREFIX_SCAN);
+    for offset in 0..=max {
+        let slice = &data[offset..];
+        if let Some(mime) = sniff_image_at(slice) {
+            return Some((mime, offset));
+        }
+    }
+    None
+}
+
+fn sniff_image_at(slice: &[u8]) -> Option<String> {
+    if slice.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        Some("image/png".to_string())
+    } else if slice.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg".to_string())
+    } else if slice.starts_with(b"GIF8") {
+        Some("image/gif".to_string())
+    } else if slice.starts_with(b"RIFF")
+        && slice.len() > 12
+        && &slice[8..12] == b"WEBP"
     {
-        "image/webp".to_string()
-    } else if data.starts_with(b"BM") {
-        "image/bmp".to_string()
+        Some("image/webp".to_string())
     } else {
-        "image/png".to_string()
+        None
     }
 }
 
@@ -283,7 +321,10 @@ mod tests {
     #[test]
     fn detect_mime_png() {
         let data = [0x89, 0x50, 0x4E, 0x47, 0x0D];
-        assert_eq!(detect_mime("image", &data), "image/png");
+        assert_eq!(
+            detect_mime("image", &data),
+            Some(("image/png".to_string(), 0)),
+        );
     }
 
     #[test]
@@ -291,7 +332,7 @@ mod tests {
         let data = [0xFF, 0xD8, 0xFF, 0xE0];
         assert_eq!(
             detect_mime("image", &data),
-            "image/jpeg",
+            Some(("image/jpeg".to_string(), 0)),
         );
     }
 
@@ -299,7 +340,7 @@ mod tests {
     fn detect_mime_gif() {
         assert_eq!(
             detect_mime("image", b"GIF89a..."),
-            "image/gif",
+            Some(("image/gif".to_string(), 0)),
         );
     }
 
@@ -310,7 +351,7 @@ mod tests {
         data[8..12].copy_from_slice(b"WEBP");
         assert_eq!(
             detect_mime("image", &data),
-            "image/webp",
+            Some(("image/webp".to_string(), 0)),
         );
     }
 
@@ -318,23 +359,42 @@ mod tests {
     fn detect_mime_bmp() {
         assert_eq!(
             detect_mime("image", b"BM\x00\x00"),
-            "image/bmp",
+            Some(("image/bmp".to_string(), 0)),
         );
     }
 
     #[test]
-    fn detect_mime_unknown_image_defaults_png() {
+    fn detect_mime_png_with_chromium_prefix() {
+        let mut data: Vec<u8> =
+            vec![0x4a, 0x95, 0x37, 0x00];
+        data.extend_from_slice(&[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A,
+            0x0A,
+        ]);
+        assert_eq!(
+            detect_mime("image", &data),
+            Some(("image/png".to_string(), 4)),
+        );
+    }
+
+    #[test]
+    fn detect_mime_unknown_image_returns_none() {
         assert_eq!(
             detect_mime("image", b"\x00\x00\x00\x00"),
-            "image/png",
+            None,
         );
+    }
+
+    #[test]
+    fn detect_mime_image_placeholder_text_dropped() {
+        assert_eq!(detect_mime("image", b"[Image]"), None);
     }
 
     #[test]
     fn detect_mime_non_image_passthrough() {
         assert_eq!(
             detect_mime("text/plain", b"anything"),
-            "text/plain",
+            Some(("text/plain".to_string(), 0)),
         );
     }
 }
