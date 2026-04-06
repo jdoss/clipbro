@@ -23,6 +23,15 @@ const PRIMARY_DEBOUNCE: std::time::Duration =
 const WATCHER_CHECK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(5);
 
+/// Delay after an overlay process exits before a new
+/// one may be spawned. Gives the Wayland compositor
+/// time to finish tearing down the previous client's
+/// surfaces and seats; without this gap, iced_winit's
+/// SctkEventLoop construction can race and crash in
+/// the wayland-client destructor path.
+const OVERLAY_RESPAWN_GAP: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WatcherKind {
     Text,
@@ -42,6 +51,7 @@ struct Daemon<C: ClipboardService> {
     clipboard: C,
     paused: bool,
     overlay_child: Option<tokio::process::Child>,
+    last_overlay_exit: Option<Instant>,
     watcher_children:
         Vec<(WatcherKind, tokio::process::Child)>,
     last_text_store: Option<(Instant, i64)>,
@@ -67,6 +77,7 @@ impl<C: ClipboardService> Daemon<C> {
             clipboard,
             paused: false,
             overlay_child: None,
+            last_overlay_exit: None,
             watcher_children: Vec::new(),
             last_text_store: None,
             last_image_store: None,
@@ -87,12 +98,12 @@ impl<C: ClipboardService> Daemon<C> {
                 if self.overlay_running() {
                     self.kill_overlay().await;
                 } else {
-                    self.spawn_overlay();
+                    self.spawn_overlay().await;
                 }
             }
             PopupAction::Show => {
                 if !self.overlay_running() {
-                    self.spawn_overlay();
+                    self.spawn_overlay().await;
                 }
             }
             PopupAction::Hide => {
@@ -379,12 +390,16 @@ impl<C: ClipboardService> Daemon<C> {
             match child.try_wait() {
                 Ok(Some(_)) => {
                     self.overlay_child = None;
+                    self.last_overlay_exit =
+                        Some(Instant::now());
                     dbus::set_visible(false);
                     false
                 }
                 Ok(None) => true,
                 Err(_) => {
                     self.overlay_child = None;
+                    self.last_overlay_exit =
+                        Some(Instant::now());
                     dbus::set_visible(false);
                     false
                 }
@@ -394,7 +409,20 @@ impl<C: ClipboardService> Daemon<C> {
         }
     }
 
-    fn spawn_overlay(&mut self) {
+    async fn spawn_overlay(&mut self) {
+        if let Some(exit_at) = self.last_overlay_exit {
+            let elapsed = exit_at.elapsed();
+            if elapsed < OVERLAY_RESPAWN_GAP {
+                let wait =
+                    OVERLAY_RESPAWN_GAP - elapsed;
+                tracing::debug!(
+                    "Waiting {wait:?} before respawn \
+                     to let compositor settle"
+                );
+                tokio::time::sleep(wait).await;
+            }
+        }
+
         let exe =
             std::env::current_exe().unwrap_or_else(
                 |_| std::path::PathBuf::from("clipbro"),
@@ -426,6 +454,8 @@ impl<C: ClipboardService> Daemon<C> {
         {
             let _ = child.kill().await;
             let _ = child.wait().await;
+            self.last_overlay_exit =
+                Some(Instant::now());
         }
         dbus::set_visible(false);
     }
