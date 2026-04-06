@@ -1112,7 +1112,7 @@ fn entry_card<'a>(
                         })
                         .collect();
                     let el = rich_text(spans)
-                        .wrapping(Wrapping::Word)
+                        .wrapping(Wrapping::WordOrGlyph)
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .into();
@@ -1125,7 +1125,7 @@ fn entry_card<'a>(
                         content.chars().take(500).collect();
                     let el = text(truncated)
                         .size(14)
-                        .wrapping(Wrapping::Word)
+                        .wrapping(Wrapping::WordOrGlyph)
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .into();
