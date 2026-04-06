@@ -248,7 +248,6 @@ impl<C: ClipboardService> Daemon<C> {
             content.len()
         );
 
-        let mut image_superseded_text = false;
         if is_image {
             self.last_image_store =
                 Some(Instant::now());
@@ -272,7 +271,6 @@ impl<C: ClipboardService> Daemon<C> {
                              {text_id} (image \
                              supersedes)"
                         );
-                        image_superseded_text = true;
                     }
                 }
             }
@@ -324,9 +322,7 @@ impl<C: ClipboardService> Daemon<C> {
             }
         }
 
-        let should_sync = self.config.sync_selections
-            && (!is_image || image_superseded_text);
-        if should_sync {
+        if self.config.sync_selections {
             let target = match source.as_str() {
                 "primary" | "primary-debounced" => {
                     "clipboard"
@@ -336,7 +332,9 @@ impl<C: ClipboardService> Daemon<C> {
             self.last_sync_hash =
                 Some(content_hash);
             self.clipboard
-                .sync_to_selection(target, &content)
+                .sync_to_selection(
+                    target, &mime, &content,
+                )
                 .await;
             tracing::debug!("Synced to {target}");
         }
@@ -839,7 +837,7 @@ mod tests {
     async fn store_text_inserts_entry() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon
@@ -883,9 +881,9 @@ mod tests {
     async fn store_syncs_clipboard_to_primary() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .withf(|target, _| target == "primary")
+            .withf(|target, _, _| target == "primary")
             .times(1)
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon
@@ -901,11 +899,11 @@ mod tests {
     async fn store_syncs_primary_to_clipboard() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .withf(|target, _| {
+            .withf(|target, _, _| {
                 target == "clipboard"
             })
             .times(1)
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon
@@ -944,7 +942,7 @@ mod tests {
     async fn store_image_supersedes_text() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon
@@ -1019,7 +1017,7 @@ mod tests {
     async fn select_entry_copies_to_clipboard() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         mock.expect_copy_to_clipboard()
             .times(1)
             .returning(|_| Box::pin(async {}));
@@ -1049,7 +1047,7 @@ mod tests {
     async fn clear_removes_non_favorites() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon
@@ -1096,7 +1094,7 @@ mod tests {
     async fn store_dedup_skips_rapid_duplicate() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon
@@ -1154,7 +1152,7 @@ mod tests {
     async fn text_after_image_is_dropped() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon
@@ -1188,9 +1186,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_image_does_not_sync() {
+    async fn store_image_syncs_to_primary_with_mime() {
         let mut mock = MockClipboardService::new();
-        mock.expect_sync_to_selection().times(0);
+        mock.expect_sync_to_selection()
+            .withf(|target, mime, _| {
+                target == "primary"
+                    && mime == "image/png"
+            })
+            .times(1)
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon
@@ -1251,7 +1255,7 @@ mod tests {
     async fn toggle_pause_resumes() {
         let mut mock = MockClipboardService::new();
         mock.expect_sync_to_selection()
-            .returning(|_, _| Box::pin(async {}));
+            .returning(|_, _, _| Box::pin(async {}));
         let mut daemon = test_daemon(mock);
 
         daemon

@@ -7,6 +7,7 @@ pub trait ClipboardService: Send + Sync {
     fn sync_to_selection(
         &self,
         target: &str,
+        mime: &str,
         data: &[u8],
     ) -> impl std::future::Future<Output = ()> + Send;
 
@@ -22,19 +23,25 @@ impl ClipboardService for WaylandClipboard {
     async fn sync_to_selection(
         &self,
         target: &str,
+        mime: &str,
         data: &[u8],
     ) {
+        let mut args: Vec<&str> = Vec::with_capacity(3);
         match target {
-            "clipboard" => wl_copy(&[], data).await,
-            "primary" => {
-                wl_copy(&["--primary"], data).await
-            }
+            "clipboard" => {}
+            "primary" => args.push("--primary"),
             other => {
                 tracing::warn!(
                     "Unknown sync target: {other}"
                 );
+                return;
             }
         }
+        if !mime.is_empty() {
+            args.push("--type");
+            args.push(mime);
+        }
+        wl_copy(&args, data).await;
     }
 
     async fn copy_to_clipboard(&self, entry: &Entry) {
