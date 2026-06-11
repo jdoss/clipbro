@@ -12,9 +12,9 @@ use cosmic::iced::widget::{
     rich_text, scrollable, text, text_input, Column, Row,
 };
 use cosmic::iced::alignment;
-use cosmic::iced_runtime::core::layout::Limits;
-use cosmic::iced_runtime::platform_specific::wayland::layer_surface::SctkLayerSurfaceSettings;
-use cosmic::iced_winit::commands::layer_surface::{
+use cosmic::iced::core::layout::Limits;
+use cosmic::iced::platform_specific::runtime::wayland::layer_surface::SctkLayerSurfaceSettings;
+use cosmic::iced::platform_specific::shell::commands::layer_surface::{
     self, KeyboardInteractivity, get_layer_surface,
 };
 
@@ -1369,7 +1369,7 @@ fn detect_active_entry(entries: &[Entry]) -> Option<i64> {
 }
 
 fn input_subscription() -> Subscription<Message> {
-    cosmic::iced_futures::event::listen_with(
+    cosmic::iced::event::listen_with(
         |event, status, _| match &event {
             iced::Event::Keyboard(
                 iced::keyboard::Event::KeyPressed {

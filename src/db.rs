@@ -608,7 +608,7 @@ async fn load_or_create_key() -> Result<String, DbError> {
     }
 
     let key: String = {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         (0..64).map(|_| rng.sample(rand::distr::Alphanumeric) as char).collect()
     };

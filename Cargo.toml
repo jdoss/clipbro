@@ -10,7 +10,7 @@ repository = "https://github.com/jdoss/clipbro"
 clap = { version = "4", features = ["derive"] }
 zbus = "5"
 tokio = { version = "1", features = ["full"] }
-rusqlite = { version = "0.39", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 oo7 = "0.6"
 nucleo = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["now"] }
@@ -18,7 +18,7 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 directories = "6"
-rand = "0.9"
+rand = "0.10"
 thiserror = "2"
 libc = "0.2.184"
 serde = { version = "1.0.228", features = ["derive"] }
