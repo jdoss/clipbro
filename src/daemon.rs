@@ -1097,10 +1097,6 @@ mod tests {
             id
         };
 
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
-
         daemon
             .handle_action(store_action(
                 "text/plain",
