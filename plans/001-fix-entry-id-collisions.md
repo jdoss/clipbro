@@ -19,6 +19,11 @@
 - **Depends on**: none
 - **Category**: bug
 - **Planned at**: commit `d7a7c18`, 2026-06-11
+- **Revised**: 2026-06-11 during execution — Step 2.1 corrected. The original
+  premise ("SQLite's default is foreign_keys OFF") is false for this build:
+  rusqlite's `bundled-sqlcipher` compiles with `-DSQLITE_DEFAULT_FOREIGN_KEYS=1`
+  (libsqlite3-sys 0.38.1 `build.rs:126`), so an explicit
+  `PRAGMA foreign_keys=OFF` before `migrate()` is required.
 
 ## Why this matters
 
@@ -162,11 +167,16 @@ SQLite cannot `ALTER TABLE` to add AUTOINCREMENT; rebuild the table. Order is
 load-bearing because `contents.entry_id` has `ON DELETE CASCADE` — dropping
 `entries` with foreign keys ON would cascade-delete all contents:
 
-1. In `open()`, move `db.migrate()` to run BEFORE
-   `conn.execute_batch("PRAGMA foreign_keys=ON;")` (i.e., migration runs with
-   foreign keys off — SQLite's default). Keep `journal_mode=WAL` before it.
-   `PRAGMA foreign_keys` cannot change inside a transaction, so this ordering
-   (rather than toggling) is the mechanism.
+1. In `open()`, run the migration with foreign keys explicitly OFF, then
+   re-enable them. Order: `PRAGMA journal_mode=WAL;` →
+   `PRAGMA foreign_keys=OFF;` → `db.migrate()` → `PRAGMA foreign_keys=ON;`.
+   The explicit OFF is load-bearing: this project's rusqlite uses
+   `bundled-sqlcipher`, and libsqlite3-sys compiles the bundled library with
+   `-DSQLITE_DEFAULT_FOREIGN_KEYS=1` (`build.rs:126` in libsqlite3-sys
+   0.38.1), so foreign keys are ON by default — relying on stock SQLite's
+   OFF default silently cascade-deletes all `contents` rows at the rebuild's
+   `DROP TABLE entries`. `PRAGMA foreign_keys` cannot change inside a
+   transaction, so the OFF must run before the rebuild's BEGIN.
 2. The rebuild, inside one transaction (`execute_batch` with explicit
    BEGIN/COMMIT is fine):
 
@@ -277,11 +287,12 @@ Stop and report back (do not improvise) if:
 
 - The schema or `insert()` at the cited lines doesn't match the excerpts.
 - `PRAGMA user_version` is already non-zero in a fresh `Database::open` test.
-- The migration test (Step 4.3) fails because `contents` rows were cascade-deleted — that means migration is running with foreign keys ON; re-check Step 2.1 ordering, and if it still fails, stop.
+- The migration test (Step 4.3) fails because `contents` rows were cascade-deleted — that means migration is running with foreign keys ON; re-check the explicit `PRAGMA foreign_keys=OFF` in Step 2.1, and if it still fails, stop.
 - You find any production code (not tests) that relies on `entry.id` equaling `entry.created_at` — search first: `rg -n "\.id" src/ | rg -i "created|time|now"`.
 
 ## Maintenance notes
 
 - Plan 002 (max_entries trimming) and plan 012 (favorite ordering) both touch this schema/area — execute this plan first; they were written assuming AUTOINCREMENT ids.
-- Reviewer should scrutinize: the foreign-keys-OFF-during-migration ordering in `open()`, and that `user_version` is set inside the same transaction as the rebuild.
+- Reviewer should scrutinize: the explicit `PRAGMA foreign_keys=OFF` before `migrate()` in `open()` (and ON after), and that `user_version` is set inside the same transaction as the rebuild.
+- Plans 002 and 012, if they do table rebuilds, are subject to the same compiled-in `SQLITE_DEFAULT_FOREIGN_KEYS=1` default — same explicit-OFF mechanism applies.
 - Deferred: backup-before-migrate (copy db file aside). The transaction makes the rebuild atomic; a file backup was judged unnecessary for a clipboard history db, but flag it to the operator if they want belt-and-suspenders.

@@ -12,11 +12,17 @@ test** (`store_image_supersedes_text` — root-caused in plan 001);
 `cargo clippy --all-targets` = 26 warnings; no CI; repo not
 rustfmt-formatted (deliberate — do not reformat).
 
+Plans 013-015 were added 2026-07-21 from a live clipboard-debugging session
+(not the original audit); their planning baseline is commit `4cddd6e`. That
+session's headline symptom — "clipbro pastes a stale image into Slack" — was
+**not** a clipbro bug (a Slack/Chromium-Ozone-Wayland clipboard cache, fixed by
+restarting Slack); see the rejected-findings note on selection churn.
+
 ## Execution order & status
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001 | Stop using timestamps as entry primary keys | P1 | M | — | TODO |
+| 001 | Stop using timestamps as entry primary keys | P1 | M | — | DONE (commit `7681222` on `improve/001-entry-id-collisions`, awaiting merge) |
 | 002 | Enforce max_entries (unbounded db growth) | P1 | S | 001 | TODO |
 | 003 | CI + zero clippy warnings + drop nucleo + `--locked` install | P1 | M | 001 | TODO |
 | 004 | Repo CLAUDE.md | P2 | S | 003 (soft) | TODO |
@@ -28,6 +34,9 @@ rustfmt-formatted (deliberate — do not reformat).
 | 010 | Extract overlay pure logic into hotkey.rs/filter.rs | P3 | M | 008 (hard), 005+006 (sequence) | TODO |
 | 011 | SPIKE: full-history search | P2 | M | 005 | TODO |
 | 012 | DESIGN: favorite ordering (favorite_position column) | P3 | S | 001 | TODO |
+| 013 | Stop overlay/CLI truncating the daemon log | P2 | S | — | DONE (branch `improve/013-log-truncation`, awaiting merge) |
+| 014 | SPIKE: images don't reach the XWayland/X11 clipboard | P2 | M | — | DONE — cosmic-comp Wayland→X11 bridge, not clipbro; (B) upstream+document |
+| 015 | Reap self-exited overlay + surface wl-copy failures | P3 | S | — | DONE (branch `improve/013-log-truncation`) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
 REJECTED (with one-line rationale).
@@ -59,8 +68,16 @@ Recorded so nobody re-audits them:
   microseconds. Not worth caching. (Plan 011 may change the entry count;
   re-evaluate only then.)
 - **`wl_copy` zombie processes** — children are tokio `Child`s; tokio's
-  orphan reaper collects them. No zombie accumulation. (Exit-status logging
-  would be nice-to-have, not a bug.)
+  orphan reaper collects them. No zombie accumulation. (The nice-to-have
+  exit-status logging, plus a prompt reap of a self-exited *overlay* — an
+  unrelated 11-min `<defunct>` seen on 2026-07-21 — are now plan 015.)
+- **Selection-ownership "churn"** — one image copy produces a few Wayland
+  selection-owner changes (source app → sync-to-primary → overlay-select).
+  Normal for a syncing clipboard manager, and proven *not* to cause the
+  2026-07-21 stale-paste report: the target app (Slack) ignores all external
+  selection changes — a Chromium/Ozone-Wayland client cache cleared only by
+  restarting Slack, not anything clipbro can influence by serving data
+  differently. Reworking the serve path buys nothing here.
 - **"Weak" SQLCipher key** — the 64-char alphanumeric key is ~381 bits of
   entropy through SQLCipher's KDF; fine. Plaintext-on-`encrypt_db=false` is
   explicit, documented user choice.
