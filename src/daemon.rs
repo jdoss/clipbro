@@ -1364,6 +1364,7 @@ pub async fn run(db: Database, config: Config) {
             }
             _ = watcher_check.tick() => {
                 daemon.check_watchers();
+                daemon.overlay_running();
             }
         }
     }
