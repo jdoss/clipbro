@@ -65,7 +65,11 @@ fn setup_logging() {
     let stderr_layer = fmt::layer().with_target(true);
 
     let log_path = config::data_dir().join("clipbro.log");
-    let log_file = std::fs::File::create(&log_path).ok();
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
     let file_layer = log_file.map(|f| {
         fmt::layer()
             .with_target(true)
