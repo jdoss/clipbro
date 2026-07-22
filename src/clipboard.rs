@@ -89,6 +89,21 @@ async fn wl_copy(args: &[&str], data: &[u8]) {
                 "wl-copy stdin write failed: {e}"
             );
             let _ = child.kill().await;
+            return;
+        }
+    }
+
+    match child.wait().await {
+        Ok(status) if !status.success() => {
+            tracing::error!(
+                "wl-copy exited with {status}"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(
+                "wl-copy wait failed: {e}"
+            );
         }
     }
 }
