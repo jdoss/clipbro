@@ -22,7 +22,7 @@ restarting Slack); see the rejected-findings note on selection churn.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001 | Stop using timestamps as entry primary keys | P1 | M | — | DONE (commit `7681222` on `improve/001-entry-id-collisions`, awaiting merge) |
+| 001 | Stop using timestamps as entry primary keys | P1 | M | — | DONE (merged to master, PR #2) |
 | 002 | Enforce max_entries (unbounded db growth) | P1 | S | 001 | TODO |
 | 003 | CI + zero clippy warnings + drop nucleo + `--locked` install | P1 | M | 001 | TODO |
 | 004 | Repo CLAUDE.md | P2 | S | 003 (soft) | TODO |
@@ -34,9 +34,9 @@ restarting Slack); see the rejected-findings note on selection churn.
 | 010 | Extract overlay pure logic into hotkey.rs/filter.rs | P3 | M | 008 (hard), 005+006 (sequence) | TODO |
 | 011 | SPIKE: full-history search | P2 | M | 005 | TODO |
 | 012 | DESIGN: favorite ordering (favorite_position column) | P3 | S | 001 | TODO |
-| 013 | Stop overlay/CLI truncating the daemon log | P2 | S | — | DONE (branch `improve/013-log-truncation`, awaiting merge) |
+| 013 | Stop overlay/CLI truncating the daemon log | P2 | S | — | DONE (merged to master via this PR) |
 | 014 | SPIKE: images don't reach the XWayland/X11 clipboard | P2 | M | — | DONE — cosmic-comp Wayland→X11 bridge, not clipbro; (B) upstream+document |
-| 015 | Reap self-exited overlay + surface wl-copy failures | P3 | S | — | DONE (branch `improve/013-log-truncation`) |
+| 015 | Reap self-exited overlay + surface wl-copy failures | P3 | S | — | DONE (merged to master via this PR) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) |
 REJECTED (with one-line rationale).
