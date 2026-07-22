@@ -35,17 +35,47 @@ impl Database {
         }
 
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
         let db = Self { conn };
+        db.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
         db.migrate()?;
+        db.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         Ok(db)
     }
 
     fn migrate(&self) -> Result<(), DbError> {
+        let version: i64 = self.conn.query_row(
+            "PRAGMA user_version",
+            [],
+            |r| r.get(0),
+        )?;
+        if version >= 1 {
+            return Ok(());
+        }
+
+        let entries_exists: bool = self
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type='table' AND name='entries'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+
+        if entries_exists {
+            self.rebuild_entries_with_autoincrement()?;
+        } else {
+            self.create_fresh_schema()?;
+        }
+        Ok(())
+    }
+
+    fn create_fresh_schema(&self) -> Result<(), DbError> {
         self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS entries (
-                id INTEGER PRIMARY KEY,
+            "CREATE TABLE entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at INTEGER NOT NULL,
                 entry_type TEXT NOT NULL,
                 favorite INTEGER NOT NULL DEFAULT 0,
@@ -64,7 +94,37 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_entries_created
                 ON entries(created_at);
             CREATE INDEX IF NOT EXISTS idx_entries_type
-                ON entries(entry_type);",
+                ON entries(entry_type);
+
+            PRAGMA user_version = 1;",
+        )?;
+        Ok(())
+    }
+
+    fn rebuild_entries_with_autoincrement(
+        &self,
+    ) -> Result<(), DbError> {
+        self.conn.execute_batch(
+            "BEGIN;
+            CREATE TABLE entries_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                entry_type TEXT NOT NULL,
+                favorite INTEGER NOT NULL DEFAULT 0,
+                favorite_position INTEGER
+            );
+            INSERT INTO entries_new
+                (id, created_at, entry_type, favorite, favorite_position)
+                SELECT id, created_at, entry_type, favorite, favorite_position
+                FROM entries;
+            DROP TABLE entries;
+            ALTER TABLE entries_new RENAME TO entries;
+            CREATE INDEX IF NOT EXISTS idx_entries_created
+                ON entries(created_at);
+            CREATE INDEX IF NOT EXISTS idx_entries_type
+                ON entries(entry_type);
+            PRAGMA user_version = 1;
+            COMMIT;",
         )?;
         Ok(())
     }
@@ -82,10 +142,10 @@ impl Database {
         }
 
         self.conn.execute(
-            "INSERT INTO entries (id, created_at, entry_type) VALUES (?, ?, ?)",
-            params![now, now, entry_type.as_str()],
+            "INSERT INTO entries (created_at, entry_type) VALUES (?, ?)",
+            params![now, entry_type.as_str()],
         )?;
-        let id = now;
+        let id = self.conn.last_insert_rowid();
 
         for (mime, content) in &data {
             self.conn.execute(
@@ -406,9 +466,6 @@ mod tests {
     fn insert_duplicate_text_returns_existing_id() {
         let db = test_db();
         let id1 = db.insert(text_data("same")).unwrap();
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
         let id2 = db.insert(text_data("same")).unwrap();
         assert_eq!(id1, id2);
     }
@@ -417,9 +474,6 @@ mod tests {
     fn insert_duplicate_text_with_whitespace() {
         let db = test_db();
         let id1 = db.insert(text_data("hello")).unwrap();
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
         let id2 =
             db.insert(text_data("  hello  ")).unwrap();
         assert_eq!(id1, id2);
@@ -430,9 +484,6 @@ mod tests {
         let db = test_db();
         let png = b"fakepngdata";
         let id1 = db.insert(image_data(png)).unwrap();
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
         let id2 = db.insert(image_data(png)).unwrap();
         assert_eq!(id1, id2);
     }
@@ -442,9 +493,6 @@ mod tests {
         let db = test_db();
         let png = b"fakepngdata";
         let id1 = db.insert(image_data(png)).unwrap();
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
         let id2 = db.insert(image_data(png)).unwrap();
         assert_eq!(id1, id2);
     }
@@ -453,24 +501,96 @@ mod tests {
     fn insert_different_text_different_ids() {
         let db = test_db();
         let id1 = db.insert(text_data("alpha")).unwrap();
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
         let id2 = db.insert(text_data("beta")).unwrap();
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn rapid_inserts_get_distinct_ids() {
+        let db = test_db();
+        let ids: std::collections::HashSet<i64> = (0..50)
+            .map(|i| {
+                db.insert(text_data(&format!("entry {i}")))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ids.len(), 50);
+    }
+
+    #[test]
+    fn deleted_id_is_never_reused() {
+        let db = test_db();
+        let _a = db.insert(text_data("a")).unwrap();
+        let b = db.insert(text_data("b")).unwrap();
+        db.delete(b).unwrap();
+        let c = db.insert(text_data("c")).unwrap();
+        assert_ne!(c, b);
+        assert!(c > b);
+    }
+
+    #[test]
+    fn migration_preserves_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        let legacy_id: i64 = 1749000000000;
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE entries (
+                    id INTEGER PRIMARY KEY,
+                    created_at INTEGER NOT NULL,
+                    entry_type TEXT NOT NULL,
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    favorite_position INTEGER
+                );
+
+                CREATE TABLE contents (
+                    entry_id INTEGER NOT NULL,
+                    mime TEXT NOT NULL,
+                    content BLOB NOT NULL,
+                    PRIMARY KEY (entry_id, mime),
+                    FOREIGN KEY (entry_id)
+                        REFERENCES entries(id) ON DELETE CASCADE
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO entries (id, created_at, entry_type)
+                 VALUES (?, ?, ?)",
+                params![legacy_id, legacy_id, "text"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO contents (entry_id, mime, content)
+                 VALUES (?, ?, ?)",
+                params![
+                    legacy_id,
+                    "text/plain;charset=utf-8",
+                    b"legacy text".to_vec(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path, false).unwrap();
+
+        let entry = db.get_entry(legacy_id).unwrap().unwrap();
+        assert_eq!(entry.id, legacy_id);
+        assert_eq!(entry.text_content(), Some("legacy text"));
+
+        let version: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
     }
 
     #[test]
     fn list_entries_favorites_first() {
         let db = test_db();
         let id1 = db.insert(text_data("first")).unwrap();
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
         let _id2 = db.insert(text_data("second")).unwrap();
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
 
         db.toggle_favorite(id1).unwrap();
 
@@ -503,6 +623,7 @@ mod tests {
             .unwrap()
             .created_at;
 
+        // created_at has millisecond resolution
         std::thread::sleep(
             std::time::Duration::from_millis(5),
         );
@@ -541,9 +662,6 @@ mod tests {
         let db = test_db();
         let fav_id =
             db.insert(text_data("keeper")).unwrap();
-        std::thread::sleep(
-            std::time::Duration::from_millis(5),
-        );
         let _gone_id =
             db.insert(text_data("disposable")).unwrap();
 
